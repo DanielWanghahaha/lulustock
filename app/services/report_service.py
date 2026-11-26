@@ -146,7 +146,11 @@ async def build_period_report(session: AsyncSession, user_id: int, portfolio_id:
         .all()
     )
     if research:
-        lines.append(f"研究更新：{len(research)} 份（{'、'.join(sorted({r.symbol for r in research}))}）")
+        from app.services.search_service import names_for
+
+        rnames = await names_for(session, sorted({r.symbol for r in research}))
+        parts = sorted({f"{rnames.get(s, s)}({s})" for s in (r.symbol for r in research)})
+        lines.append(f"研究更新：{len(research)} 份（{'、'.join(parts)}）")
     else:
         lines.append("研究更新：无")
 
@@ -176,8 +180,12 @@ async def build_period_report(session: AsyncSession, user_id: int, portfolio_id:
         .all()
     )
     if positions:
-        top = positions[0]
-        lines.append(f"当前第一大持仓（成本口径）：{top.symbol} ¥{top.total_cost:,.0f}")
+        from app.services.search_service import names_for
+
+        pnames = await names_for(session, [positions[0].symbol])
+        nm = pnames.get(positions[0].symbol)
+        title = f"{nm}({positions[0].symbol})" if nm else positions[0].symbol
+        lines.append(f"当前第一大持仓（成本口径）：{title} ¥{positions[0].total_cost:,.0f}")
     lines += ["", "ℹ️ 本报告为模板化复盘，不构成投资建议。"]
     return "\n".join(lines)
 
