@@ -121,7 +121,7 @@ def main() -> None:
         )
         app.job_queue.run_monthly(
             _monthly,
-            time=dtmod.time(hour=10, minute=0, tzinfo=ZoneInfo("Asia/Shanghai")),
+            when=dtmod.time(hour=10, minute=0, tzinfo=ZoneInfo("Asia/Shanghai")),
             day=1,
             name="monthly_report",
         )
