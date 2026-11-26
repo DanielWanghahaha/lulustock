@@ -362,3 +362,14 @@ class UserSetting(Base):
     setting_value: Mapped[str] = mapped_column(String(32))
 
     __table_args__ = (sa.UniqueConstraint("user_id", "setting_key", name="uq_user_setting"),)
+
+
+class Security(Base):
+    """A 股证券主数据（沪深），供搜索与名称解析。"""
+
+    __tablename__ = "securities"
+
+    symbol: Mapped[str] = mapped_column(String(16), primary_key=True)
+    name: Mapped[str] = mapped_column(String(32))
+    market: Mapped[str] = mapped_column(String(8), default="")
+    updated_at: Mapped[sa.DateTime] = mapped_column(DATETIME(fsp=6), server_default=TS6)

@@ -83,7 +83,6 @@ def main() -> None:
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("ping", ping))
     app.add_handler(CommandHandler("import", import_cmd))
-    app.add_handler(CommandHandler("trade", trade_cmd))
     app.add_handler(CommandHandler("portfolio", portfolio_cmd))
     app.add_handler(CommandHandler("cancel", cancel_cmd))
     app.add_handler(CommandHandler("watchlist", watchlist_cmd))
@@ -94,6 +93,9 @@ def main() -> None:
     app.add_handler(CommandHandler("alerts", alerts_cmd))
     app.add_handler(CommandHandler("report", report_cmd))
     app.add_handler(CommandHandler("settings", settings_cmd))
+    from app.bot.trade_wizard import build_trade_conversation
+
+    app.add_handler(build_trade_conversation())
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(CallbackQueryHandler(on_callback, pattern=r"^act:"))
