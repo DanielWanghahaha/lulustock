@@ -22,6 +22,9 @@ from app.bot.handlers import (
     start,
     status,
     trade_cmd,
+    today_cmd,
+    update_quotes_cmd,
+    watchlist_cmd,
 )
 from app.config import get_settings
 
@@ -50,6 +53,9 @@ def main() -> None:
     app.add_handler(CommandHandler("trade", trade_cmd))
     app.add_handler(CommandHandler("portfolio", portfolio_cmd))
     app.add_handler(CommandHandler("cancel", cancel_cmd))
+    app.add_handler(CommandHandler("watchlist", watchlist_cmd))
+    app.add_handler(CommandHandler("today", today_cmd))
+    app.add_handler(CommandHandler("update_quotes", update_quotes_cmd))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(CallbackQueryHandler(on_callback, pattern=r"^act:"))
@@ -66,6 +72,27 @@ def main() -> None:
                 pass
 
     app.add_error_handler(on_error)
+
+    from app.jobs.scheduler import post_close_job, send_pending_outbox
+
+    async def _outbox_job(context) -> None:  # type: ignore[no-untyped-def]
+        await send_pending_outbox(context.bot)
+
+    async def _post_close(context) -> None:  # type: ignore[no-untyped-def]
+        await post_close_job(context.bot)
+
+    if settings.enable_schedules:
+        from zoneinfo import ZoneInfo
+
+        import datetime as dtmod
+
+        app.job_queue.run_repeating(_outbox_job, interval=10, first=3, name="outbox_sender")
+        app.job_queue.run_daily(
+            _post_close,
+            time=dtmod.time(hour=16, minute=35, tzinfo=ZoneInfo("Asia/Shanghai")),
+            days=(0, 1, 2, 3, 4),
+            name="post_close_brief",
+        )
 
     app.run_polling(drop_pending_updates=True)
 

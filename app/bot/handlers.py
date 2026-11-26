@@ -23,8 +23,17 @@ from app.services.portfolio_service import (
     parse_import_csv,
     portfolio_snapshot,
 )
+from app.services.quotes_service import latest_closes, latest_trading_date, persist_snapshot, update_quotes
+from app.services.report_service import build_daily_brief
+from app.services.watchlist_service import (
+    add_watch,
+    list_watchlist,
+    parse_alerts,
+    remove_watch,
+)
 from app.services.user_service import ensure_policy_v1, ensure_user, get_default_portfolio
 from app.storage.db import Session
+from app.storage.models import DailyQuote, OutboxMessage
 from app.storage.models import (
     PendingAction,
     PendingActionType,
@@ -210,9 +219,18 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     text("SELECT COUNT(*) FROM pending_actions WHERE status = 'pending'")
                 )
             ).scalar()
+            last_trade_day = await latest_trading_date(session)
+            outbox_pending = (
+                await session.execute(text("SELECT COUNT(*) FROM outbox WHERE status = 'pending'"))
+            ).scalar()
+            outbox_failed = (
+                await session.execute(text("SELECT COUNT(*) FROM outbox WHERE status = 'failed'"))
+            ).scalar()
         lines.append(f"✅ 数据库：MySQL {version}（{db_ms:.0f} ms）")
         lines.append(f"✅ 数据表：{table_count} 张")
         lines.append(f"⏳ 待确认操作：{pending} 个")
+        lines.append(f"📡 行情截止：{last_trade_day or '无数据'}")
+        lines.append(f"📤 通知队列：待发 {outbox_pending} / 失败 {outbox_failed}")
     except Exception as exc:  # noqa: BLE001
         log.exception("DB status check failed")
         lines.append(f"❌ 数据库异常：{type(exc).__name__}: {exc}")
@@ -388,6 +406,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if loaded is None:
         return
     user, _portfolio = loaded
+    if await _handle_watchlist_intent(update, txt, user):
+        return
     parsed = parse_trade_text(txt)
     if isinstance(parsed, str):
         if context.user_data.get("awaiting_import"):  # type: ignore[attr-defined]
@@ -556,23 +576,191 @@ async def portfolio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     _user, portfolio = loaded
     async with Session() as session:
         positions, cash = await portfolio_snapshot(session, portfolio.id)
+        closes = await latest_closes(session, [p.symbol for p in positions])
     if not positions and cash == Decimal("0"):
         await update.message.reply_text(
             "📊 **我的持仓**\n\n暂无持仓记录。\n发送 /import 导入现有持仓，或 /trade 登记交易。",
             parse_mode="Markdown",
         )
         return
-    lines = ["📊 **我的持仓**\n", "代码 | 数量 | 均价成本 | 成本金额", ""]
+    lines = ["📊 **我的持仓**", ""]
     total_cost = Decimal("0")
+    total_value = Decimal("0")
+    have_all_quotes = all(p.symbol in closes for p in positions)
     for p in positions:
         total_cost += p.total_cost
-        lines.append(f"`{p.symbol}`  {p.quantity}  @ {_fmt(p.avg_cost)}  → {_fmt(p.total_cost)}")
-    lines += [
-        "",
-        f"持仓成本合计：¥{_fmt(total_cost)}",
-        f"现金余额：¥{_fmt(cash)}",
-        f"资产合计（成本口径）：¥{_fmt(total_cost + cash)}",
-        "",
-        "ℹ️ 行情数据模块上线后显示最新市值与盈亏。",
-    ]
+        c = closes.get(p.symbol)
+        if c is not None:
+            d, close = c
+            value = p.quantity * close
+            total_value += value
+            pnl = (close - p.avg_cost) / p.avg_cost if p.avg_cost else Decimal("0")
+            lines.append(
+                f"`{p.symbol}`  {p.quantity}股  成本{_fmt(p.avg_cost)} → 现价{_fmt(close)}（{d}）"
+                f"  市值 {_fmt(value)}  盈亏 {pnl * 100:+.2f}%"
+            )
+        else:
+            lines.append(f"`{p.symbol}`  {p.quantity}股  成本{_fmt(p.avg_cost)} → 行情缺失（按成本 {_fmt(p.total_cost)} 计）")
+    lines += ["", f"持仓成本合计：¥{_fmt(total_cost)}"]
+    if have_all_quotes and positions:
+        lines += [
+            f"持仓市值合计：¥{_fmt(total_value)}",
+            f"现金余额：¥{_fmt(cash)}",
+            f"组合净值：¥{_fmt(total_value + cash)}",
+        ]
+    else:
+        lines += [
+            f"现金余额：¥{_fmt(cash)}",
+            f"资产合计（成本口径）：¥{_fmt(total_cost + cash)}",
+            "⚠️ 部分持仓缺行情，发送 /update_quotes 更新后显示市值。",
+        ]
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+# ---------------------------------------------------------------- M2：观察池
+
+
+async def watchlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorized(update):
+        await _deny(update)
+        return
+    assert update.message is not None
+    loaded = await _load_user(update)
+    if loaded is None:
+        return
+    user, _pf = loaded
+    async with Session() as session:
+        items = await list_watchlist(session, user.id)
+    if not items:
+        await update.message.reply_text(
+            "⭐ **投资观察池**（空）\n\n"
+            "添加方式：发送 `添加 600036.SH 上限45 下限38`\n"
+            "（上限/下限为可选价格触发线）\n"
+            "移除方式：`移除 600036.SH`",
+            parse_mode="Markdown",
+        )
+        return
+    lines = ["⭐ **投资观察池**\n"]
+    for it in items:
+        alerts = []
+        if it.price_alert_high is not None:
+            alerts.append(f"上限 {it.price_alert_high}")
+        if it.price_alert_low is not None:
+            alerts.append(f"下限 {it.price_alert_low}")
+        lines.append(f"`{it.symbol}` {' / '.join(alerts) if alerts else '无价格触发'}")
+    lines += ["", "添加：`添加 600036.SH 上限45 下限38`；移除：`移除 600036.SH`"]
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def _handle_watchlist_intent(update: Update, txt: str, user) -> bool:
+    """识别 添加/移除 观察池意图；处理成功返回 True。"""
+    add = None
+    for kw in ("添加", "关注", "加入观察池", "加入"):
+        if txt.startswith(kw):
+            add = True
+            break
+    if add is None:
+        for kw in ("移除", "取消关注", "删除"):
+            if txt.startswith(kw):
+                add = False
+                break
+    if add is None:
+        return False
+    rest = txt.split(maxsplit=1)[1] if len(txt.split(maxsplit=1)) > 1 else ""
+    import re as _re
+
+    sm = _re.search(r"\d{6}(?:\.(?:SH|SZ|BJ))?", rest, _re.IGNORECASE)
+    if sm is None:
+        if update.message:
+            await update.message.reply_text("请提供股票代码，例如：添加 600036.SH 上限45 下限38")
+        return True
+    symbol = sm.group(0)
+    high, low, err = parse_alerts(rest)
+    if err:
+        if update.message:
+            await update.message.reply_text(f"⚠️ {err}")
+        return True
+    async with Session() as session:
+        if add:
+            item, error = await add_watch(session, user.id, symbol, note=None, high=high, low=low)
+            await session.commit()
+            if error:
+                if update.message:
+                    await update.message.reply_text(f"⚠️ {error}")
+            elif update.message:
+                alerts = []
+                if high is not None:
+                    alerts.append(f"收盘 ≥ {high} 触发")
+                if low is not None:
+                    alerts.append(f"收盘 ≤ {low} 触发")
+                alert_txt = "；".join(alerts) if alerts else "未设置价格触发"
+                await update.message.reply_text(
+                    f"⭐ 已加入观察池：`{item.symbol}`\n触发规则：{alert_txt}\n"
+                    "（触发为研究提醒，不等于买入建议）",
+                    parse_mode="Markdown",
+                )
+        else:
+            ok, error = await remove_watch(session, user.id, symbol)
+            await session.commit()
+            if update.message:
+                await update.message.reply_text(f"🗑 已从观察池移除：`{symbol}`" if ok else f"⚠️ {error}", parse_mode="Markdown")
+    return True
+
+
+# ---------------------------------------------------------------- M2：简报与行情
+
+
+async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorized(update):
+        await _deny(update)
+        return
+    assert update.message is not None
+    loaded = await _load_user(update)
+    if loaded is None:
+        return
+    user, portfolio = loaded
+    msg = await update.message.reply_text("⏳ 正在更新行情并生成简报…")
+    try:
+        async with Session() as session:
+            result = await update_quotes(session)
+            await persist_snapshot(session, portfolio)
+            await session.commit()
+        async with Session() as session:
+            brief = await build_daily_brief(session, user.id, portfolio)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("today brief failed")
+        await msg.edit_text(f"❌ 简报生成失败：{type(exc).__name__}: {exc}")
+        return
+    await msg.edit_text(brief, parse_mode="Markdown")
+
+
+async def update_quotes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorized(update):
+        await _deny(update)
+        return
+    assert update.message is not None
+    loaded = await _load_user(update)
+    if loaded is None:
+        return
+    _user, portfolio = loaded
+    msg = await update.message.reply_text("⏳ 正在更新行情…")
+    try:
+        async with Session() as session:
+            result = await update_quotes(session)
+            snap = await persist_snapshot(session, portfolio)
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.exception("update quotes failed")
+        await msg.edit_text(f"❌ 行情更新失败：{type(exc).__name__}: {exc}")
+        return
+    latest_txt = "\n".join(
+        f"• `{s}` {d} 收盘 {c}" for s, (d, c) in result["latest"].items()
+    ) or "（无代码）"
+    unsupported_note = f"\n⚠️ {result['unsupported']} 个北交所代码暂不支持" if result["unsupported"] else ""
+    await msg.edit_text(
+        f"📡 **行情更新完成**\n"
+        f"成功 {result['ok']} / 失败 {result['failed']}{unsupported_note}\n\n{latest_txt}\n\n"
+        f"💾 今日快照：现金 {snap.cash:,.2f} + 市值 {snap.market_value:,.2f} = 净值 {snap.nav:,.2f}"
+        + ("" if snap.complete else "\n⚠️ 部分持仓缺行情，快照标记为不完整"),
+        parse_mode="Markdown",
+    )

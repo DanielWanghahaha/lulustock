@@ -213,3 +213,93 @@ class PendingAction(Base):
     expires_at: Mapped[sa.DateTime] = mapped_column(DATETIME(fsp=6))
     created_at: Mapped[sa.DateTime] = mapped_column(DATETIME(fsp=6), server_default=TS6)
     confirmed_at: Mapped[sa.DateTime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+
+
+class DailyQuote(Base):
+    """日线收盘价（未复权），按来源留存与质量标记。"""
+
+    __tablename__ = "daily_quotes"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(16))
+    trade_date: Mapped[sa.Date] = mapped_column(Date)
+    close: Mapped[Decimal] = mapped_column(Numeric(20, 6))
+    currency: Mapped[str] = mapped_column(CHAR(3), default="CNY")
+    source: Mapped[str] = mapped_column(String(32), default="eastmoney")
+    quality: Mapped[str] = mapped_column(SAEnum("ok", "stale", "missing", "conflict", name="quote_quality"), default="ok")
+    source_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    fetched_at: Mapped[sa.DateTime] = mapped_column(DATETIME(fsp=6), server_default=TS6)
+
+    __table_args__ = (
+        sa.UniqueConstraint("symbol", "trade_date", "source", name="uq_quote_symbol_date_source"),
+        sa.Index("idx_quote_symbol_date", "symbol", "trade_date"),
+    )
+
+
+class TradingCalendar(Base):
+    __tablename__ = "trading_calendar"
+
+    trade_date: Mapped[sa.Date] = mapped_column(Date, primary_key=True)
+    source: Mapped[str] = mapped_column(String(32), default="eastmoney")
+    created_at: Mapped[sa.DateTime] = mapped_column(DATETIME(fsp=6), server_default=TS6)
+
+
+class WatchlistItem(Base):
+    __tablename__ = "watchlist"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    symbol: Mapped[str] = mapped_column(String(16))
+    note: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    price_alert_high: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    price_alert_low: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    added_at: Mapped[sa.DateTime] = mapped_column(DATETIME(fsp=6), server_default=TS6)
+
+    __table_args__ = (sa.UniqueConstraint("user_id", "symbol", name="uq_watchlist_user_symbol"),)
+
+
+class OutboxMessage(Base):
+    """外发通知队列：先落库再投递，失败可重试。"""
+
+    __tablename__ = "outbox"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    event_key: Mapped[str] = mapped_column(String(128), unique=True)
+    text: Mapped[str] = mapped_column(sa.Text)
+    status: Mapped[str] = mapped_column(SAEnum("pending", "sent", "failed", name="outbox_status"), default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_retry_at: Mapped[sa.DateTime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+    created_at: Mapped[sa.DateTime] = mapped_column(DATETIME(fsp=6), server_default=TS6)
+    sent_at: Mapped[sa.DateTime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+
+
+class JobRun(Base):
+    """调度任务执行审计。"""
+
+    __tablename__ = "job_runs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    job_name: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(SAEnum("ok", "error", name="jobrun_status"), default="ok")
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[sa.DateTime] = mapped_column(DATETIME(fsp=6), server_default=TS6)
+    finished_at: Mapped[sa.DateTime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+
+
+class PortfolioSnapshot(Base):
+    """每日组合净值快照：用于回撤与收益序列。"""
+
+    __tablename__ = "portfolio_snapshots"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    portfolio_id: Mapped[int] = mapped_column(ForeignKey("portfolios.id"), index=True)
+    trade_date: Mapped[sa.Date] = mapped_column(Date)
+    cash: Mapped[Decimal] = mapped_column(Numeric(20, 6), default=0)
+    market_value: Mapped[Decimal] = mapped_column(Numeric(20, 6), default=0)
+    nav: Mapped[Decimal] = mapped_column(Numeric(20, 6), default=0)
+    complete: Mapped[bool] = mapped_column(Boolean, default=True)  # 是否所有持仓均有有效行情
+    computed_at: Mapped[sa.DateTime] = mapped_column(DATETIME(fsp=6), server_default=TS6)
+
+    __table_args__ = (sa.UniqueConstraint("portfolio_id", "trade_date", name="uq_snapshot"),)

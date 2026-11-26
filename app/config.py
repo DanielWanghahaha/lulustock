@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     # 逗号分隔的 Telegram 数字用户 ID；为空时拒绝所有人
     telegram_allowed_user_ids: str = ""
 
+    enable_schedules: bool = False
+
     database_url: str = ""
 
     @property
