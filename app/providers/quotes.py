@@ -46,7 +46,7 @@ class TencentProvider:
         code = _tencent_code(symbol)
         if code is None:
             return []
-        count = 120
+        count = 320
         url = f"{_TENCENT_KLINE}?param={code},day,,,{count}"
         async with httpx.AsyncClient(timeout=10, headers=_HEADERS) as client:
             resp = await client.get(url)

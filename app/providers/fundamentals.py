@@ -1,4 +1,5 @@
 """基本面数据：东方财富公开快照（PE/PB/市值/ROE）与 F10 主要财务指标。"""
+import asyncio
 from typing import Any
 
 import httpx
@@ -28,31 +29,39 @@ def _emcode(symbol: str) -> str | None:
 
 
 async def fetch_valuation_snapshot(symbol: str) -> dict[str, Any] | None:
-    """实时估值快照：名称/现价/PE(TTM)/PB/总市值/ROE。"""
-    secid = _secid(symbol)
-    if secid is None:
+    """实时估值快照（腾讯公开行情）：名称/现价/PE(TTM)/PB/总市值。"""
+    code = _emcode(symbol)
+    if code is None:
         return None
+    qt_code = code.lower()  # 腾讯要求小写前缀 sh/sz
+    fields: list[str] = []
     async with httpx.AsyncClient(timeout=10, headers=_HEADERS) as client:
-        resp = await client.get(
-            "https://push2.eastmoney.com/api/qt/stock/get",
-            params={"secid": secid, "fields": "f43,f57,f58,f116,f162,f167,f173"},
-        )
-        resp.raise_for_status()
-        data = (resp.json().get("data") or {})
-    if not data:
+        for _ in range(3):
+            resp = await client.get(f"https://qt.gtimg.cn/q={qt_code}")
+            resp.raise_for_status()
+            text = resp.content.decode("gbk", errors="replace")
+            fields = text.split("~")
+            if len(fields) >= 47:
+                break
+            await asyncio.sleep(0.8)
+    if len(fields) < 47:
         return None
 
-    def _scale(v, factor: float) -> float | None:
-        return v / factor if isinstance(v, (int, float)) and v > 0 else None
+    def _f(i: str) -> float | None:
+        try:
+            v = float(fields[int(i)])
+            return v if v > 0 else None
+        except (ValueError, IndexError):
+            return None
 
     return {
-        "name": data.get("f58"),
-        "price": _scale(data.get("f43"), 100),
-        "pe_ttm": _scale(data.get("f162"), 100),
-        "pb": _scale(data.get("f167"), 100),
-        "total_market_cap_yi": round(data["f116"] / 1e8, 1) if isinstance(data.get("f116"), (int, float)) else None,
-        "roe_pct": data.get("f173") if isinstance(data.get("f173"), (int, float)) else None,
-        "source": "eastmoney_snapshot",
+        "name": fields[1],
+        "price": _f("3"),
+        "pe_ttm": _f("39"),
+        "pb": _f("46"),
+        "total_market_cap_yi": _f("45"),
+        "float_market_cap_yi": _f("44"),
+        "source": "tencent_snapshot",
     }
 
 
