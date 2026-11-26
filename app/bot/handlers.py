@@ -275,6 +275,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/today — 盘后简报\n"
         "/stress [幅度] — 压力测试（如 /stress 25）\n"
         "/decision 代码 — 深度决策卡\n"
+        "/opportunities — 主动筛选（红利/价值/周期）\n"
+        "/industry 行业 — 行业周期雷达\n"
         "/alerts — 风险预警历史\n"
         "/report week|month — 周报 / 月报\n"
         "/settings — 自动任务开关\n"
@@ -506,6 +508,15 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await _handle_research_intent(update, txt):
         return
     if await _handle_m5_intent(update, context, txt):
+        return
+    if txt in ("机会", "筛选", "找机会"):
+        context.args = []
+        await opportunities_cmd(update, context)
+        return
+    if txt.startswith(("行业", "周期")):
+        arg = txt.replace("行业", "").replace("周期", "").replace("雷达", "").strip()
+        context.args = [arg] if arg else []
+        await industry_cmd(update, context)
         return
     parsed = parse_trade_text(txt)
     if isinstance(parsed, str):
@@ -1471,3 +1482,175 @@ async def _handle_m5_intent(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         await _run_decision_flow(update, m2.group(1).strip())
         return True
     return False
+
+
+# ---------------------------------------------------------------- M5：筛选 / 行业雷达
+
+
+_SCREEN_POOL_LABELS = {
+    "dividend": "红利候选池",
+    "value": "优质价值候选池",
+    "cyclical": "行业周期候选池",
+}
+
+
+async def opportunities_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorized(update):
+        await _deny(update)
+        return
+    assert update.message is not None
+    pool = context.args[0].lower() if context.args else ""
+    if pool in ("红利", "dividend"):
+        pass
+    elif pool in ("价值", "value"):
+        pool = "value"
+    elif pool in ("周期", "cyclical"):
+        pool = "cyclical"
+    elif pool in ("dividend", "value", "cyclical"):
+        pass
+    else:
+        buttons = [
+            [InlineKeyboardButton("红利候选池", callback_data="scr:dividend")],
+            [InlineKeyboardButton("优质价值候选池", callback_data="scr:value")],
+            [InlineKeyboardButton("行业周期候选池", callback_data="scr:cyclical")],
+        ]
+        await update.message.reply_text(
+            "🔎 **主动筛选**（P1 · 待校准评分）\n\n请选择候选池：\n"
+            "⚠️ 分数仅代表研究优先级；低PE/高股息不等于买入信号。",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        return
+    await _run_screening(update, pool)
+
+
+async def _run_screening(update: Update, pool: str) -> None:
+    send_target = update.message or (update.callback_query.message if update.callback_query else None)
+    if send_target is None:
+        return
+    if update.callback_query:
+        await update.callback_query.answer()
+    msg = await send_target.reply_text(f"⏳ 正在筛选 {_SCREEN_POOL_LABELS.get(pool, pool)}（约 20-40 秒）…")
+    from app.services.screening_service import run_screening, score_tier
+
+    try:
+        label, rows = await run_screening(pool)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("screening failed")
+        await msg.edit_text(f"❌ 筛选失败：{type(exc).__name__}: {exc}")
+        return
+    lines = [f"🔎 **{label}**（评分待校准，仅研究优先级参考）\n"]
+    for i, r in enumerate(rows[:10], 1):
+        yoy = f"{r.profit_yoy:+.1f}%" if r.profit_yoy is not None else "—"
+        lines.append(
+            f"{i}. {score_tier(r.score)} {r.score}分  {r.name}（{r.symbol}）\n"
+            f"    PE {r.pe if r.pe else '—'} / PB {r.pb if r.pb else '—'} / 净利同比 {yoy}  {r.components}"
+        )
+    lines += [
+        "",
+        "≥85 优先研究 / 75-84 重点观察 / 60-74 储备 / <60 观察",
+        "⚠️ 低PE、高股息不能单独触发买入；重大财务风险一票否决。",
+    ]
+    top = rows[:3]
+    buttons = [[InlineKeyboardButton(f"⭐ {r.name}", callback_data=f"wladd:{r.symbol}")] for r in top]
+    kb_rows = [buttons] if buttons else None
+    try:
+        await msg.edit_text("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb_rows) if kb_rows else None)
+    except Exception:  # noqa: BLE001
+        await msg.edit_text("\n".join(lines))
+
+
+async def on_scr_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None or not _authorized(update):
+        if query:
+            await query.answer("未授权", show_alert=True)
+        return
+    pool = query.data.split(":", 1)[1]  # type: ignore[union-attr]
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:  # noqa: BLE001
+        pass
+    await _run_screening(update, pool)
+
+
+_INDUSTRY_KEYWORDS = sorted(
+    {"煤炭", "银行", "白酒", "房地产", "钢铁", "有色", "电力", "医药", "半导体", "新能源车"},
+    key=len,
+    reverse=True,
+)
+
+
+async def industry_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorized(update):
+        await _deny(update)
+        return
+    assert update.message is not None
+    arg = (context.args[0] if context.args else "").strip()
+    if not arg:
+        await update.message.reply_text(
+            "🏭 **行业周期雷达**（v1 降级版：篮子统计 + 模型定性，供需/库存数据源未接入）\n\n"
+            f"支持行业：{'、'.join(_INDUSTRY_KEYWORDS)}\n\n用法：`/industry 煤炭` 或发送 `行业 煤炭`",
+            parse_mode="Markdown",
+        )
+        return
+    await _run_industry(update, arg)
+
+
+async def _run_industry(update: Update, industry: str) -> None:
+    matched = next((k for k in _INDUSTRY_KEYWORDS if k in industry), None)
+    if matched is None:
+        if update.message:
+            await update.message.reply_text(
+                f"暂不支持「{industry}」。支持：{'、'.join(_INDUSTRY_KEYWORDS)}"
+            )
+        return
+    send_target = update.message or (update.callback_query.message if update.callback_query else None)
+    if send_target is None:
+        return
+    msg = await send_target.reply_text(f"⏳ 正在生成 {matched} 行业雷达（约 20-40 秒）…")
+    from app.services.industry_service import scan_industry
+
+    try:
+        result = await scan_industry(matched)
+    except LLMError as exc:
+        await msg.edit_text(f"❌ 行业雷达失败：{exc}")
+        return
+    except Exception as exc:  # noqa: BLE001
+        log.exception("industry scan failed")
+        await msg.edit_text(f"❌ 行业雷达失败：{type(exc).__name__}: {exc}")
+        return
+    if isinstance(result, str):
+        await msg.edit_text(f"⚠️ {result}")
+        return
+    basket, q = result["basket"], result["qualitative"]
+    lines = [
+        f"🏭 **{matched} 行业雷达**（v1：篮子统计确定性 + 定性判断未核验）\n",
+        f"篮子 60 日均涨幅：{basket['avg_chg_60d_pct']:+.1f}%",
+        f"篮子 120 日均涨幅：{basket['avg_chg_120d_pct']:+.1f}%",
+        f"篮子 250 日区间位置：{basket['avg_pos_in_250d_range_pct']:.0f}%（0=最低 100=最高）",
+        "",
+        "**代表股：**",
+    ]
+    for s in basket["stocks"]:
+        chg = f"{s['chg_60d_pct']:+.1f}%" if s.get("chg_60d_pct") is not None else "—"
+        pos = f"{s['pos_in_range_pct']:.0f}%" if s.get("pos_in_range_pct") is not None else "—"
+        lines.append(f"• {s['symbol']}  60日 {chg}  区间位置 {pos}")
+    cycle_icons = {"底部": "🟢", "回升": "🔵", "中位": "🟡", "高位": "🔴", "回落": "🟠"}
+    lines += [
+        "",
+        f"**周期判断：**{cycle_icons.get(q.get('cycle_position'), '•')} {q.get('cycle_position')}",
+        f"· 供需：{q.get('supply_demand_view', '')[:150]}",
+        f"· 盈利：{q.get('earnings_trend_view', '')[:150]}",
+    ]
+    risks = q.get("risks") or []
+    if risks:
+        lines.append(f"· 风险：{'；'.join(risks[:4])[:150]}")
+    watch = q.get("watch_points") or []
+    if watch:
+        lines.append(f"\n**建议跟踪：**{'；'.join(watch[:4])}")
+    lines.append("\n⚠️ 供需/库存/产能为模型知识，未经实时数据核验；本雷达不构成投资建议。")
+    try:
+        await msg.edit_text("\n".join(lines[:50]), parse_mode="Markdown")
+    except Exception:  # noqa: BLE001
+        await msg.edit_text("\n".join(lines[:50]))
