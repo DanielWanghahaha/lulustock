@@ -1,6 +1,7 @@
 """Bot 入口：注册命令并启动 long polling。"""
 import logging
 from telegram import Update
+from telegram import BotCommand
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -8,6 +9,22 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+
+BOT_COMMANDS = [
+    BotCommand("today", "今日盘后简报"),
+    BotCommand("portfolio", "查看我的持仓"),
+    BotCommand("import", "导入持仓 CSV"),
+    BotCommand("trade", "登记已执行交易"),
+    BotCommand("research", "个股研究（如 /research 600036.SH）"),
+    BotCommand("valuation", "三情景估值"),
+    BotCommand("watchlist", "投资观察池与价格触发"),
+    BotCommand("alerts", "风险预警历史"),
+    BotCommand("report", "投资周报/月报"),
+    BotCommand("settings", "自动任务开关"),
+    BotCommand("status", "系统与数据状态"),
+    BotCommand("menu", "主菜单"),
+    BotCommand("help", "帮助与能力边界"),
+]
 
 from app.bot.handlers import (
     alerts_cmd,
@@ -50,7 +67,16 @@ def main() -> None:
         level=settings.log_level,
     )
 
-    app = Application.builder().token(settings.telegram_bot_token).build()
+    async def _post_init(application) -> None:  # type: ignore[no-untyped-def]
+        await application.bot.set_my_commands(BOT_COMMANDS, language_code="zh")
+        await application.bot.set_my_commands(BOT_COMMANDS)
+
+    app = (
+        Application.builder()
+        .token(settings.telegram_bot_token)
+        .post_init(_post_init)
+        .build()
+    )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
     app.add_handler(CommandHandler("help", help_cmd))

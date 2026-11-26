@@ -82,10 +82,89 @@ async def _deny(update: Update) -> None:
 
 def _main_menu() -> ReplyKeyboardMarkup:
     rows = [
-        [KeyboardButton("📊 我的持仓"), KeyboardButton("📥 导入持仓")],
-        [KeyboardButton("✏️ 交易入账"), KeyboardButton("🖥 系统状态")],
+        [KeyboardButton("📈 今日简报"), KeyboardButton("📊 我的持仓")],
+        [KeyboardButton("✏️ 交易入账"), KeyboardButton("📥 导入持仓")],
+        [KeyboardButton("🔍 个股研究"), KeyboardButton("⭐ 投资观察池")],
+        [KeyboardButton("⚠️ 风险预警"), KeyboardButton("📄 投资报告")],
+        [KeyboardButton("⚙️ 设置"), KeyboardButton("🖥 系统状态")],
+        [KeyboardButton("❓ 帮助")],
     ]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
+
+# 菜单按钮与中文关键词 → 功能路由
+_MENU_ROUTES: list[tuple[tuple[str, ...], str]] = [
+    (("📈 今日简报", "今日简报", "简报", "今天"), "today"),
+    (("📊 我的持仓", "我的持仓", "持仓"), "portfolio"),
+    (("✏️ 交易入账", "交易入账", "交易"), "trade"),
+    (("📥 导入持仓", "导入持仓", "导入"), "import"),
+    (("🔍 个股研究", "个股研究"), "research"),
+    (("⭐ 投资观察池", "投资观察池", "观察池"), "watchlist"),
+    (("⚠️ 风险预警", "风险预警", "预警"), "alerts"),
+    (("📄 投资报告", "投资报告", "周报", "月报", "报告"), "report"),
+    (("⚙️ 设置", "设置"), "settings"),
+    (("🖥 系统状态", "系统状态", "状态"), "status"),
+    (("❓ 帮助", "帮助", "菜单", "首页", "主菜单"), "help"),
+]
+
+
+async def _route_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE, txt: str) -> bool:
+    """精确/前缀匹配菜单按钮与中文关键词，直接调用对应命令处理器。"""
+    target = None
+    for keys, action in _MENU_ROUTES:
+        for k in keys:
+            if txt == k or txt.startswith(k):
+                target = action
+                break
+        if target:
+            break
+    if target is None:
+        return False
+    handlers_map = {
+        "today": today_cmd,
+        "portfolio": portfolio_cmd,
+        "trade": trade_cmd,
+        "import": import_cmd,
+        "research": None,  # 特殊处理
+        "watchlist": watchlist_cmd,
+        "alerts": alerts_cmd,
+        "report": None,  # 特殊处理
+        "settings": settings_cmd,
+        "status": status,
+        "help": help_cmd,
+    }
+    if target == "research":
+        rest = txt.replace("个股研究", "").replace("🔍", "").strip()
+        if _re.match(r"^\d{6}", rest):
+            await _run_and_send_research(update, rest, mode="research")
+        else:
+            if update.message:
+                await update.message.reply_text(
+                    "🔍 **个股研究**\n\n请发送：`研究 600036.SH`（或 /research 600036.SH）\n"
+                    "也可发 `估值 600036.SH` 只看估值。",
+                    parse_mode="Markdown",
+                )
+        return True
+    if target == "report":
+        if "月报" in txt:
+            kind = ["month"]
+        elif "周报" in txt:
+            kind = ["week"]
+        else:
+            if update.message:
+                await update.message.reply_text(
+                    "📄 **投资报告**\n\n请选择：发送 `周报` 或 `月报`（也可 /report week、/report month）",
+                    parse_mode="Markdown",
+                )
+            return True
+        context.args = kind
+        await report_cmd(update, context)
+        return True
+    handler = handlers_map.get(target)
+    if handler is None:
+        return False
+    await handler(update, context)
+    return True
 
 
 async def _load_user(update: Update):
@@ -409,6 +488,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     assert update.message is not None and update.effective_chat is not None
     txt = (update.message.text or "").strip()
+    if await _route_menu_text(update, context, txt):
+        return
     loaded = await _load_user(update)
     if loaded is None:
         return
