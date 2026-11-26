@@ -1190,7 +1190,7 @@ async def alerts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     icons = {"red": "🔴", "yellow": "🟡", "info": "🔵"}
     lines = ["⚠️ **风险预警历史**（最近 20 条）\n"]
     for e in events:
-        ts = (e.created_at or "")[:16].replace("T", " ")
+        ts = e.created_at.strftime("%m-%d %H:%M") if e.created_at else ""
         lines.append(f"{icons.get(e.level, '•')} [{e.code}] {ts}\n   {e.message[:120]}")
     await update.message.reply_text("\n".join(lines))
 
