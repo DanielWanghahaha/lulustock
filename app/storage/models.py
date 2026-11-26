@@ -303,3 +303,21 @@ class PortfolioSnapshot(Base):
     computed_at: Mapped[sa.DateTime] = mapped_column(DATETIME(fsp=6), server_default=TS6)
 
     __table_args__ = (sa.UniqueConstraint("portfolio_id", "trade_date", name="uq_snapshot"),)
+
+
+class ResearchVersion(Base):
+    """个股研究不可变版本：一股一档，版本可追溯。"""
+
+    __tablename__ = "research_versions"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    symbol: Mapped[str] = mapped_column(String(16))
+    version: Mapped[int] = mapped_column(Integer)
+    mode: Mapped[str] = mapped_column(SAEnum("research", "valuation", name="research_mode"), default="research")
+    as_of: Mapped[sa.Date] = mapped_column(Date)
+    conclusion: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[sa.DateTime] = mapped_column(DATETIME(fsp=6), server_default=TS6)
+
+    __table_args__ = (sa.UniqueConstraint("user_id", "symbol", "version", name="uq_research_version"),)

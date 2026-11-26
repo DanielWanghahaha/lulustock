@@ -21,6 +21,10 @@ class Settings(BaseSettings):
 
     database_url: str = ""
 
+    llm_api_key: str = ""
+    llm_base_url: str = "https://api.deepseek.com"
+    llm_model: str = "deepseek-chat"
+
     @property
     def allowed_user_ids(self) -> frozenset[int]:
         ids = {

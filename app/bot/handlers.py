@@ -185,6 +185,10 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/import — 导入持仓 CSV\n"
         "/trade — 登记已执行交易\n"
         "/portfolio — 查看持仓\n"
+        "/watchlist — 观察池与价格触发\n"
+        "/research 代码 — 个股研究\n"
+        "/valuation 代码 — 三情景估值\n"
+        "/today — 盘后简报\n"
         "/cancel — 取消待确认操作\n"
         "/status — 数据库与系统状态\n"
         "/ping — 数据库延迟测试\n\n"
@@ -407,6 +411,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     user, _portfolio = loaded
     if await _handle_watchlist_intent(update, txt, user):
+        return
+    if await _handle_research_intent(update, txt):
         return
     parsed = parse_trade_text(txt)
     if isinstance(parsed, str):
@@ -764,3 +770,219 @@ async def update_quotes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         + ("" if snap.complete else "\n⚠️ 部分持仓缺行情，快照标记为不完整"),
         parse_mode="Markdown",
     )
+
+
+# ---------------------------------------------------------------- M3：研究
+
+import re as _re  # noqa: E402
+
+from telegram import InlineKeyboardButton as _IKB  # noqa: E402
+from telegram import Update as _Upd  # noqa: E402
+from app.services.research_service import CONCLUSION_LABELS, run_research  # noqa: E402
+from app.services.portfolio_service import normalize_symbol as _norm_sym  # noqa: E402
+
+_RESEARCH_INTENT_RE = _re.compile(r"^(?:研究|分析|估值)\s*[:：]?\s*(.+)$", _re.IGNORECASE)
+
+
+def _research_card(payload: dict, symbol: str, version: int, mode: str) -> str:
+    title = "研究卡" if mode == "research" else "估值卡"
+    lines = [
+        f"🔍 **{payload.get('company_name') or symbol}** ({symbol}) {title} v{version}",
+        f"结论：**{CONCLUSION_LABELS.get(payload['conclusion'], payload['conclusion'])}**",
+        "",
+        f"📄 {payload.get('summary', '')}",
+        "",
+        "**投资逻辑：**",
+    ]
+    for t in payload.get("thesis", [])[:4]:
+        conf = t.get("confidence", "medium") if isinstance(t, dict) else "medium"
+        point = t.get("point") if isinstance(t, dict) else str(t)
+        lines.append(f"• {point}（置信：{conf}）")
+    lines.append("**反方观点：**")
+    for c in payload.get("counterarguments", [])[:4]:
+        lines.append(f"• {c}")
+    val = payload.get("valuation") or {}
+    sc = val.get("scenarios") or {}
+    if sc:
+        lines.append(
+            "**三情景估值（假设性，缺财务数据）：**\n"
+            f"悲观 {sc.get('pessimistic', {}).get('price')} / 中性 {sc.get('neutral', {}).get('price')} / 乐观 {sc.get('optimistic', {}).get('price')}"
+        )
+    missing = payload.get("missing_data") or []
+    if missing:
+        lines.append(f"\n⚠️ 缺失数据：{'、'.join(missing[:5])}")
+    return "\n".join(lines[:40])
+
+
+async def _run_and_send_research(update: Update, symbol_raw: str, mode: str) -> None:
+    assert update.message is not None and update.effective_chat is not None
+    symbol = _norm_sym(symbol_raw)
+    if symbol is None:
+        await update.message.reply_text("⚠️ 请提供有效的 6 位股票代码，如：研究 600036.SH")
+        return
+    loaded = await _load_user(update)
+    if loaded is None:
+        return
+    user, _pf = loaded
+    wait_txt = (
+        f"⏳ 正在研究 `{symbol}`（调用 LLM，约 30-60 秒）…"
+        if mode == "research"
+        else f"⏳ 正在为 `{symbol}` 生成三情景估值（约 30-60 秒）…"
+    )
+    msg = await update.message.reply_text(wait_txt, parse_mode="Markdown")
+    try:
+        async with Session() as session:
+            result = await run_research(session, user.id, symbol, mode=mode)
+            await session.commit()
+    except LLMError as exc:
+        await msg.edit_text(f"❌ 研究失败：{exc}")
+        return
+    except Exception as exc:  # noqa: BLE001
+        log.exception("research failed")
+        await msg.edit_text(f"❌ 研究失败：{type(exc).__name__}: {exc}")
+        return
+    if "error" in result:
+        await msg.edit_text(f"⚠️ {result['error']}")
+        return
+    payload = result["payload"]
+    card = _research_card(payload, symbol, result["version"], mode)
+    try:
+        await msg.edit_text(card, parse_mode="Markdown", reply_markup=_research_keyboard(symbol))
+    except Exception:  # noqa: BLE001
+        await msg.edit_text(card, reply_markup=_research_keyboard(symbol))
+    # 完整报告以文件发送
+    import tempfile
+
+    from telegram import InputFile
+
+    md = _full_report_md(payload, symbol, result["version"], result["price"])
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as f:
+        f.write(md)
+        path = f.name
+    try:
+        with open(path, "rb") as f:
+            await update.message.reply_document(f, filename=f"research_{symbol}_v{result['version']}.md")
+    finally:
+        import os
+
+        os.unlink(path)
+
+
+def _research_keyboard(symbol: str):
+    return InlineKeyboardMarkup(
+        [[_IKB("⭐ 加入观察池", callback_data=f"wladd:{symbol}")]]
+    )
+
+
+def _full_report_md(payload: dict, symbol: str, version: int, price: dict) -> str:
+    lines = [
+        f"# {payload.get('company_name') or symbol} 研究报告 v{version}",
+        "",
+        f"> 标的：{symbol} | 生成时间：{date.today().isoformat()} | 结论：{CONCLUSION_LABELS.get(payload['conclusion'], payload['conclusion'])}",
+        "",
+        f"## 行情数据（确定性）",
+        f"```json\n{price}\n```",
+        "",
+        f"## 摘要\n{payload.get('summary', '')}",
+        "",
+        "## 投资逻辑",
+    ]
+    for t in payload.get("thesis", []):
+        if isinstance(t, dict):
+            lines.append(f"- {t.get('point')}（置信：{t.get('confidence')}）")
+        else:
+            lines.append(f"- {t}")
+    lines += ["", "## 反方观点"]
+    for c in payload.get("counterarguments", []):
+        lines.append(f"- {c}")
+    lines += ["", "## 主要风险"]
+    for r in payload.get("risks", []):
+        lines.append(f"- {r}")
+    lines += ["", "## 逻辑失效条件"]
+    for r in payload.get("invalidation_conditions", []):
+        lines.append(f"- {r}")
+    val = payload.get("valuation") or {}
+    sc = val.get("scenarios") or {}
+    lines += [
+        "",
+        "## 三情景估值（假设性，待财务数据验证）",
+        f"方法：{val.get('method', '')}",
+        "",
+    ]
+    for k, label in (("pessimistic", "悲观"), ("neutral", "中性"), ("optimistic", "乐观")):
+        s = sc.get(k) or {}
+        lines.append(f"- **{label}**：{s.get('price')} — {s.get('rationale', '')}")
+    lines += ["", "## 关键假设"]
+    for a in val.get("assumptions", []):
+        lines.append(f"- {a}")
+    if val.get("warning"):
+        lines += ["", f"⚠️ {val['warning']}"]
+    lines += ["", "## 缺失数据"]
+    for m in payload.get("missing_data", []):
+        lines.append(f"- {m}")
+    lines += [
+        "",
+        "---",
+        "声明：本报告由 AI 生成，仅用于个人研究参考，不构成投资建议；定性内容未经核验，财务数据缺失，估值结论为假设性。",
+    ]
+    return "\n".join(lines)
+
+
+async def research_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorized(update):
+        await _deny(update)
+        return
+    assert update.message is not None
+    arg = (context.args or [""])[0] if context.args else ""
+    if not arg:
+        await update.message.reply_text("用法：`/research 600036.SH`", parse_mode="Markdown")
+        return
+    await _run_and_send_research(update, arg, mode="research")
+
+
+async def valuation_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorized(update):
+        await _deny(update)
+        return
+    assert update.message is not None
+    arg = (context.args or [""])[0] if context.args else ""
+    if not arg:
+        await update.message.reply_text("用法：`/valuation 600036.SH`", parse_mode="Markdown")
+        return
+    await _run_and_send_research(update, arg, mode="valuation")
+
+
+async def _handle_research_intent(update: Update, txt: str) -> bool:
+    m = _RESEARCH_INTENT_RE.match(txt)
+    if m is None:
+        return False
+    target = m.group(1).strip()
+    mode = "valuation" if txt.startswith("估值") else "research"
+    if not _re.match(r"^\d{6}", target):
+        return False  # 名称解析留待后续；无代码则走其他分支
+    await _run_and_send_research(update, target, mode=mode)
+    return True
+
+
+async def on_wladd_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None or not _authorized(update):
+        if query:
+            await query.answer("未授权", show_alert=True)
+        return
+    symbol = query.data.split(":", 1)[1]  # type: ignore[union-attr]
+    loaded = await _load_user(update)
+    if loaded is None:
+        return
+    user, _pf = loaded
+    async with Session() as session:
+        item, error = await add_watch(session, user.id, symbol)
+        await session.commit()
+    if error:
+        await query.answer(error, show_alert=True)
+        return
+    await query.answer("已加入观察池")
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:  # noqa: BLE001
+        pass

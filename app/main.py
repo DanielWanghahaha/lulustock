@@ -17,13 +17,16 @@ from app.bot.handlers import (
     on_callback,
     on_document,
     on_text,
+    on_wladd_callback,
     ping,
     portfolio_cmd,
+    research_cmd,
     start,
     status,
     trade_cmd,
     today_cmd,
     update_quotes_cmd,
+    valuation_cmd,
     watchlist_cmd,
 )
 from app.config import get_settings
@@ -56,9 +59,12 @@ def main() -> None:
     app.add_handler(CommandHandler("watchlist", watchlist_cmd))
     app.add_handler(CommandHandler("today", today_cmd))
     app.add_handler(CommandHandler("update_quotes", update_quotes_cmd))
+    app.add_handler(CommandHandler("research", research_cmd))
+    app.add_handler(CommandHandler("valuation", valuation_cmd))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(CallbackQueryHandler(on_callback, pattern=r"^act:"))
+    app.add_handler(CallbackQueryHandler(on_wladd_callback, pattern=r"^wladd:"))
 
     async def on_error(update: object, context) -> None:  # type: ignore[no-untyped-def]
         logging.getLogger(__name__).error("Unhandled error", exc_info=context.error)
