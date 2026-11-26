@@ -125,3 +125,13 @@ async def search_securities(session: AsyncSession, query: str, limit: int = 8) -
     if not results:
         results = await _search_suggest(query, limit)
     return results
+
+
+async def names_for(session: AsyncSession, symbols: list[str]) -> dict[str, str]:
+    """批量查询代码→名称（无缓存时代码即名称占位）。"""
+    if not symbols:
+        return {}
+    rows = (
+        await session.execute(select(Security).where(Security.symbol.in_(symbols)))
+    ).scalars().all()
+    return {r.symbol: r.name for r in rows}

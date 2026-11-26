@@ -130,9 +130,20 @@ async def symbol_choose(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     tw = context.user_data["tw"]  # type: ignore[attr-defined]
     if symbol == "skip":
         tw["symbol"] = None
+        tw["name"] = None
         await query.edit_message_text("不关联股票。请输入金额（元），如 `840`：")
         return CASH_AMOUNT
     tw["symbol"] = symbol
+    tw["name"] = None  # 从按钮文本回查名称
+    try:
+        parts = query.message.reply_markup.inline_keyboard if query.message and query.message.reply_markup else None
+        if parts:
+            for row in parts:
+                for btn in row:
+                    if btn.callback_data == query.data and "（" in btn.text:
+                        tw["name"] = btn.text.split("（")[0]
+    except Exception:  # noqa: BLE001
+        pass
     await query.edit_message_text(
         f"股票：**{symbol}**（2/3）\n\n请输入数量（股），如 `100`：",
         parse_mode="Markdown",
@@ -250,7 +261,7 @@ async def _finalize(update: Update, context: ContextTypes.DEFAULT_TYPE, tw: dict
     from app.storage.models import PendingActionType
 
     pa = await _create_pending(user, update.effective_chat.id, PendingActionType.confirm_trade, payload)
-    card = _trade_preview_card(pv) + f"\n\n⏳ 30 分钟内确认有效（编号 {pa.token}）"
+    card = _trade_preview_card(pv, name=tw.get("name")) + f"\n\n⏳ 30 分钟内确认有效（编号 {pa.token}）"
     kb = _confirm_keyboard(pa.token)
     if via_query is not None:
         await via_query.edit_message_text(card, parse_mode="Markdown", reply_markup=kb)

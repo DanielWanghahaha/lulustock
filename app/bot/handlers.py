@@ -31,6 +31,7 @@ from app.services.watchlist_service import (
     parse_alerts,
     remove_watch,
 )
+from app.services.search_service import names_for, search_securities
 from app.services.user_service import ensure_policy_v1, ensure_user, get_default_portfolio
 from app.storage.db import Session
 from app.storage.models import DailyQuote, OutboxMessage
@@ -140,8 +141,12 @@ async def _route_menu_text(update: Update, context: ContextTypes.DEFAULT_TYPE, t
         else:
             if update.message:
                 await update.message.reply_text(
-                    "🔍 **个股研究**\n\n请发送：`研究 600036.SH`（或 /research 600036.SH）\n"
-                    "也可发 `估值 600036.SH` 只看估值。",
+                    "🔍 **个股研究**\n\n"
+                    "支持三种输入：\n"
+                    "• `研究 600036.SH`（代码）\n"
+                    "• `研究 招行`（名称搜索）\n"
+                    "• `研究 zsyh`（拼音）\n\n"
+                    "只看估值：`估值 600036.SH`",
                     parse_mode="Markdown",
                 )
         return True
@@ -460,13 +465,13 @@ async def trade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-def _trade_preview_card(pv: TradePreview) -> str:
+def _trade_preview_card(pv: TradePreview, name: str | None = None) -> str:
     lines = [
         "📝 **请核对交易记录**（仅登记，不涉及下单）\n",
         f"方向：**{DIR_LABELS[pv.direction]}**",
     ]
     if pv.symbol:
-        lines.append(f"代码：`{pv.symbol}`")
+        lines.append(f"代码：`{pv.symbol}`" + (f" {name}" if name else ""))
     if pv.quantity is not None:
         lines.append(f"数量：{pv.quantity} 股")
     if pv.price is not None:
@@ -511,6 +516,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text(f"⚠️ {parsed}")
         return
     pv = parsed
+    if pv.symbol:
+        async with Session() as session:
+            nm = await names_for(session, [pv.symbol])
+        pv_name = nm.get(pv.symbol)
+    else:
+        pv_name = None
     payload = {
         "direction": pv.direction.value,
         "symbol": pv.symbol,
@@ -528,7 +539,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     }
     pa = await _create_pending(user, update.effective_chat.id, PendingActionType.confirm_trade, payload)
     await update.message.reply_text(
-        _trade_preview_card(pv) + f"\n\n⏳ 30 分钟内确认有效（编号 {pa.token}）",
+        _trade_preview_card(pv, name=pv_name) + f"\n\n⏳ 30 分钟内确认有效（编号 {pa.token}）",
         parse_mode="Markdown",
         reply_markup=_confirm_keyboard(pa.token),
     )
@@ -667,6 +678,7 @@ async def portfolio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     async with Session() as session:
         positions, cash = await portfolio_snapshot(session, portfolio.id)
         closes = await latest_closes(session, [p.symbol for p in positions])
+        names = await names_for(session, [p.symbol for p in positions])
     if not positions and cash == Decimal("0"):
         await update.message.reply_text(
             "📊 **我的持仓**\n\n暂无持仓记录。\n发送 /import 导入现有持仓，或 /trade 登记交易。",
@@ -679,6 +691,8 @@ async def portfolio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     have_all_quotes = all(p.symbol in closes for p in positions)
     for p in positions:
         total_cost += p.total_cost
+        nm = names.get(p.symbol)
+        title = f"`{p.symbol}` {nm}" if nm else f"`{p.symbol}`"
         c = closes.get(p.symbol)
         if c is not None:
             d, close = c
@@ -686,11 +700,11 @@ async def portfolio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             total_value += value
             pnl = (close - p.avg_cost) / p.avg_cost if p.avg_cost else Decimal("0")
             lines.append(
-                f"`{p.symbol}`  {p.quantity}股  成本{_fmt(p.avg_cost)} → 现价{_fmt(close)}（{d}）"
+                f"{title}  {p.quantity}股  成本{_fmt(p.avg_cost)} → 现价{_fmt(close)}（{d}）"
                 f"  市值 {_fmt(value)}  盈亏 {pnl * 100:+.2f}%"
             )
         else:
-            lines.append(f"`{p.symbol}`  {p.quantity}股  成本{_fmt(p.avg_cost)} → 行情缺失（按成本 {_fmt(p.total_cost)} 计）")
+            lines.append(f"{title}  {p.quantity}股  成本{_fmt(p.avg_cost)} → 行情缺失（按成本 {_fmt(p.total_cost)} 计）")
     lines += ["", f"持仓成本合计：¥{_fmt(total_cost)}"]
     if have_all_quotes and positions:
         lines += [
@@ -721,23 +735,26 @@ async def watchlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user, _pf = loaded
     async with Session() as session:
         items = await list_watchlist(session, user.id)
+        wnames = await names_for(session, [it.symbol for it in items])
     if not items:
         await update.message.reply_text(
             "⭐ **投资观察池**（空）\n\n"
             "添加方式：发送 `添加 600036.SH 上限45 下限38`\n"
-            "（上限/下限为可选价格触发线）\n"
+            "（支持名称/拼音搜索，如 `添加 招行 上限45`）\n"
             "移除方式：`移除 600036.SH`",
             parse_mode="Markdown",
         )
         return
     lines = ["⭐ **投资观察池**\n"]
     for it in items:
+        nm = wnames.get(it.symbol)
         alerts = []
         if it.price_alert_high is not None:
             alerts.append(f"上限 {it.price_alert_high}")
         if it.price_alert_low is not None:
             alerts.append(f"下限 {it.price_alert_low}")
-        lines.append(f"`{it.symbol}` {' / '.join(alerts) if alerts else '无价格触发'}")
+        title = f"`{it.symbol}` {nm}" if nm else f"`{it.symbol}`"
+        lines.append(f"{title}  {' / '.join(alerts) if alerts else '无价格触发'}")
     lines += ["", "添加：`添加 600036.SH 上限45 下限38`；移除：`移除 600036.SH`"]
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
@@ -760,16 +777,36 @@ async def _handle_watchlist_intent(update: Update, txt: str, user) -> bool:
     import re as _re
 
     sm = _re.search(r"\d{6}(?:\.(?:SH|SZ|BJ))?", rest, _re.IGNORECASE)
-    if sm is None:
-        if update.message:
-            await update.message.reply_text("请提供股票代码，例如：添加 600036.SH 上限45 下限38")
-        return True
-    symbol = sm.group(0)
     high, low, err = parse_alerts(rest)
     if err:
         if update.message:
             await update.message.reply_text(f"⚠️ {err}")
         return True
+    if sm is None and rest.strip():
+        # 名称/拼音搜索 → 单个直接加，多个出候选按钮
+        async with Session() as session:
+            matches = await search_securities(session, rest.strip())
+            await session.commit()
+        if not matches:
+            if update.message:
+                await update.message.reply_text(f"未找到与「{rest.strip()}」匹配的 A 股。")
+            return True
+        if len(matches) == 1:
+            symbol = matches[0]["symbol"]
+        else:
+            buttons = [
+                [InlineKeyboardButton(f"{mm['name']}（{mm['symbol']}）", callback_data=f"wladd:{mm['symbol']}")]
+                for mm in matches[:8]
+            ]
+            if update.message:
+                await update.message.reply_text("找到多个候选，请点击加入观察池：", reply_markup=InlineKeyboardMarkup(buttons))
+            return True
+    elif sm is None:
+        if update.message:
+            await update.message.reply_text("请提供股票，例如：添加 600036.SH 上限45 下限38（也支持名称/拼音搜索）")
+        return True
+    else:
+        symbol = sm.group(0)
     async with Session() as session:
         if add:
             item, error = await add_watch(session, user.id, symbol, note=None, high=high, low=low)
@@ -905,10 +942,12 @@ def _research_card(payload: dict, symbol: str, version: int, mode: str) -> str:
 
 
 async def _run_and_send_research(update: Update, symbol_raw: str, mode: str) -> None:
-    assert update.message is not None and update.effective_chat is not None
+    assert update.effective_chat is not None and update.effective_user is not None
     symbol = _norm_sym(symbol_raw)
     if symbol is None:
-        await update.message.reply_text("⚠️ 请提供有效的 6 位股票代码，如：研究 600036.SH")
+        target = update.message if update.message else (update.callback_query.message if update.callback_query else None)
+        if target:
+            await target.reply_text("⚠️ 请提供有效的 6 位股票代码，如：研究 600036.SH")
         return
     loaded = await _load_user(update)
     if loaded is None:
@@ -919,7 +958,11 @@ async def _run_and_send_research(update: Update, symbol_raw: str, mode: str) -> 
         if mode == "research"
         else f"⏳ 正在为 `{symbol}` 生成三情景估值（约 30-60 秒）…"
     )
-    msg = await update.message.reply_text(wait_txt, parse_mode="Markdown")
+    if update.callback_query is not None:
+        await update.callback_query.answer()
+        msg = await update.callback_query.message.reply_text(wait_txt, parse_mode="Markdown")  # type: ignore[union-attr]
+    else:
+        msg = await update.message.reply_text(wait_txt, parse_mode="Markdown")  # type: ignore[union-attr]
     try:
         async with Session() as session:
             result = await run_research(session, user.id, symbol, mode=mode)
@@ -958,9 +1001,10 @@ async def _run_and_send_research(update: Update, symbol_raw: str, mode: str) -> 
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as f:
         f.write(md)
         path = f.name
+    send_target = update.message or (update.callback_query.message if update.callback_query else None)
     try:
         with open(path, "rb") as f:
-            await update.message.reply_document(f, filename=f"research_{symbol}_v{result['version']}.md")
+            await send_target.reply_document(f, filename=f"research_{symbol}_v{result['version']}.md")  # type: ignore[union-attr]
     finally:
         import os
 
@@ -1057,10 +1101,44 @@ async def _handle_research_intent(update: Update, txt: str) -> bool:
         return False
     target = m.group(1).strip()
     mode = "valuation" if txt.startswith("估值") else "research"
-    if not _re.match(r"^\d{6}", target):
-        return False  # 名称解析留待后续；无代码则走其他分支
-    await _run_and_send_research(update, target, mode=mode)
-    return True
+    if _re.match(r"^\d{6}", target):
+        await _run_and_send_research(update, target, mode=mode)
+        return True
+    if _re.search(r"\d{4}", target) or len(target) >= 2:
+        # 名称 / 拼音搜索 → 候选按钮
+        async with Session() as session:
+            matches = await search_securities(session, target)
+            await session.commit()
+        if not matches:
+            if update.message:
+                await update.message.reply_text(f"未找到与「{target}」匹配的 A 股，换个关键词试试。")
+            return True
+        if len(matches) == 1:
+            await _run_and_send_research(update, matches[0]["symbol"], mode=mode)
+            return True
+        buttons = [
+            [InlineKeyboardButton(f"{mm['name']}（{mm['symbol']}）", callback_data=f"rsm:{mode}:{mm['symbol']}")]
+            for mm in matches[:8]
+        ]
+        if update.message:
+            await update.message.reply_text("找到多个候选，请点击选择：", reply_markup=InlineKeyboardMarkup(buttons))
+        return True
+    return False
+
+
+async def on_rs_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """研究候选按钮：rsm:{mode}:{symbol}"""
+    query = update.callback_query
+    if query is None or not _authorized(update):
+        if query:
+            await query.answer("未授权", show_alert=True)
+        return
+    _, mode, symbol = query.data.split(":", 2)  # type: ignore[union-attr]
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:  # noqa: BLE001
+        pass
+    await _run_and_send_research(update, symbol, mode=mode)
 
 
 async def on_wladd_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

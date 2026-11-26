@@ -51,6 +51,16 @@ async def evaluate_portfolio(
         .scalars()
         .all()
     )
+    try:
+        from app.services.search_service import names_for
+
+        _names = await names_for(session, [p.symbol for p in positions])
+    except Exception:  # noqa: BLE001
+        _names = {}
+    def _nm(symbol: str | None) -> str:
+        if symbol and _names.get(symbol):
+            return f"{_names[symbol]}({symbol})"
+        return symbol or "未知"
     closes: dict[str, tuple[date, Decimal]] = {}
     for p in positions:
         row = (
@@ -84,7 +94,7 @@ async def evaluate_portfolio(
             Finding(
                 "yellow",
                 "R10",
-                f"以下持仓缺少有效行情，精确市值与仓位不可用：{', '.join(stale)}",
+                f"以下持仓缺少有效行情，精确市值与仓位不可用：{', '.join(_nm(s) for s in stale)}",
             )
         )
 
@@ -110,7 +120,7 @@ async def evaluate_portfolio(
                     Finding(
                         "yellow",
                         "R01",
-                        f"集中度超限：{p.symbol} 仓位 {w * 100:.1f}% > 上限 {max_single * 100:.0f}%（暂停使超限加重的新增建议）",
+                        f"集中度超限：{_nm(p.symbol)} 仓位 {w * 100:.1f}% > 上限 {max_single * 100:.0f}%（暂停使超限加重的新增建议）",
                     )
                 )
         cash_weight = cash / nav
@@ -175,10 +185,10 @@ async def evaluate_portfolio(
         d, close = c
         if w.price_alert_high is not None and close >= w.price_alert_high:
             findings.append(
-                Finding("yellow", "R11", f"观察价位触达：{w.symbol} 收盘 {close} ≥ 上限 {w.price_alert_high}（{d}）→ 建议启动估值与基本面复核，不等于买入")
+                Finding("yellow", "R11", f"观察价位触达：{_nm(w.symbol)} 收盘 {close} ≥ 上限 {w.price_alert_high}（{d}）→ 建议启动估值与基本面复核，不等于买入")
             )
         if w.price_alert_low is not None and close <= w.price_alert_low:
             findings.append(
-                Finding("yellow", "R11", f"观察价位触达：{w.symbol} 收盘 {close} ≤ 下限 {w.price_alert_low}（{d}）→ 建议启动估值与基本面复核，不等于买入")
+                Finding("yellow", "R11", f"观察价位触达：{_nm(w.symbol)} 收盘 {close} ≤ 下限 {w.price_alert_low}（{d}）→ 建议启动估值与基本面复核，不等于买入")
             )
     return findings, summary

@@ -34,6 +34,7 @@ from app.bot.handlers import (
     menu,
     on_callback,
     on_document,
+    on_rs_callback,
     on_set_callback,
     on_text,
     on_wladd_callback,
@@ -101,6 +102,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(on_callback, pattern=r"^act:"))
     app.add_handler(CallbackQueryHandler(on_wladd_callback, pattern=r"^wladd:"))
     app.add_handler(CallbackQueryHandler(on_set_callback, pattern=r"^set:"))
+    app.add_handler(CallbackQueryHandler(on_rs_callback, pattern=r"^rsm:"))
 
     async def on_error(update: object, context) -> None:  # type: ignore[no-untyped-def]
         logging.getLogger(__name__).error("Unhandled error", exc_info=context.error)
