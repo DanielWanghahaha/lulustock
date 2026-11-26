@@ -50,7 +50,7 @@ async def entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
         "✏️ **交易入账向导**（登记已完成交易，不是下单）\n\n请选择方向：",
         parse_mode="Markdown",
-        reply_markup=_kb([_DIR_OPTIONS[:2], _DIR_OPTIONS[2:], []]),
+        reply_markup=_kb([_DIR_OPTIONS[:2], _DIR_OPTIONS[2:]]),
     )
     return DIRECTION
 
