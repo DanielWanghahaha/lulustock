@@ -1,6 +1,6 @@
 """Bot 入口：注册命令并启动 long polling。"""
 import logging
-
+from telegram import Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -53,6 +53,19 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(CallbackQueryHandler(on_callback, pattern=r"^act:"))
+
+    async def on_error(update: object, context) -> None:  # type: ignore[no-untyped-def]
+        logging.getLogger(__name__).error("Unhandled error", exc_info=context.error)
+        if isinstance(update, Update) and update.effective_chat:
+            try:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="⚠️ 处理出错，请稍后重试；若持续出现请联系管理员。",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+    app.add_error_handler(on_error)
 
     app.run_polling(drop_pending_updates=True)
 

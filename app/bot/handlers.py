@@ -46,6 +46,11 @@ DIR_LABELS = {
 }
 
 
+def _utcnow() -> datetime:
+    """数据库 DATETIME 统一存取 naive UTC。"""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 def _authorized(update: Update) -> bool:
     settings = get_settings()
     user = update.effective_user
@@ -102,7 +107,7 @@ async def _create_pending(user: User, chat_id: int, action_type: PendingActionTy
             chat_id=chat_id,
             action_type=action_type,
             payload=payload,
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=PENDING_TTL_MINUTES),
+            expires_at=_utcnow() + timedelta(minutes=PENDING_TTL_MINUTES),
         )
         session.add(pa)
         await session.commit()
@@ -458,7 +463,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if pa.status != PendingStatus.pending:
             await query.answer("该操作已处理，请勿重复点击", show_alert=True)
             return
-        now = datetime.now(timezone.utc)
+        now = _utcnow()
         if action == "cancel":
             pa.status = PendingStatus.cancelled
             await session.commit()

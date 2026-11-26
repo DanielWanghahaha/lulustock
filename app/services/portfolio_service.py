@@ -122,7 +122,7 @@ async def confirm_import(
         file_hash=file_hash,
         status="confirmed",
         row_count=len(rows),
-        confirmed_at=datetime.now(timezone.utc),
+        confirmed_at=datetime.now(timezone.utc).replace(tzinfo=None),
     )
     session.add(batch)
     await session.flush()
@@ -161,7 +161,7 @@ async def confirm_import(
         n += 1
     await recompute_positions(session, portfolio.id)
     pending.status = PendingStatus.confirmed
-    pending.confirmed_at = datetime.now(timezone.utc)
+    pending.confirmed_at = datetime.now(timezone.utc).replace(tzinfo=None)
     await session.flush()
     return n
 

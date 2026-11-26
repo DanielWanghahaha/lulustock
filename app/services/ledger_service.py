@@ -140,6 +140,6 @@ async def confirm_trade(
     await session.flush()
     await recompute_positions(session, portfolio.id)
     pending.status = PendingStatus.confirmed
-    pending.confirmed_at = datetime.now(timezone.utc)
+    pending.confirmed_at = datetime.now(timezone.utc).replace(tzinfo=None)
     await session.flush()
     return entry
