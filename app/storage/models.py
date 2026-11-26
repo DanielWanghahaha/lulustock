@@ -321,3 +321,44 @@ class ResearchVersion(Base):
     created_at: Mapped[sa.DateTime] = mapped_column(DATETIME(fsp=6), server_default=TS6)
 
     __table_args__ = (sa.UniqueConstraint("user_id", "symbol", "version", name="uq_research_version"),)
+
+
+class RiskEvent(Base):
+    """风险事件持久化：同级同内容事件按 dedupe_key 去重。"""
+
+    __tablename__ = "risk_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    level: Mapped[str] = mapped_column(SAEnum("info", "yellow", "red", name="risk_level"), default="yellow")
+    code: Mapped[str] = mapped_column(String(8))
+    message: Mapped[str] = mapped_column(String(512))
+    dedupe_key: Mapped[str] = mapped_column(String(128), unique=True)
+    created_at: Mapped[sa.DateTime] = mapped_column(DATETIME(fsp=6), server_default=TS6)
+    resolved_at: Mapped[sa.DateTime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+
+
+class Report(Base):
+    """周期报告存档。"""
+
+    __tablename__ = "reports"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    report_type: Mapped[str] = mapped_column(SAEnum("daily", "weekly", "monthly", name="report_type"), default="weekly")
+    period: Mapped[str] = mapped_column(String(16))
+    content: Mapped[str] = mapped_column(sa.Text)
+    created_at: Mapped[sa.DateTime] = mapped_column(DATETIME(fsp=6), server_default=TS6)
+
+    __table_args__ = (sa.UniqueConstraint("user_id", "report_type", "period", name="uq_report_period"),)
+
+
+class UserSetting(Base):
+    __tablename__ = "user_settings"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    setting_key: Mapped[str] = mapped_column(String(32))
+    setting_value: Mapped[str] = mapped_column(String(32))
+
+    __table_args__ = (sa.UniqueConstraint("user_id", "setting_key", name="uq_user_setting"),)

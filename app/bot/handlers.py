@@ -189,6 +189,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/research 代码 — 个股研究\n"
         "/valuation 代码 — 三情景估值\n"
         "/today — 盘后简报\n"
+        "/alerts — 风险预警历史\n"
+        "/report week|month — 周报 / 月报\n"
+        "/settings — 自动任务开关\n"
         "/cancel — 取消待确认操作\n"
         "/status — 数据库与系统状态\n"
         "/ping — 数据库延迟测试\n\n"
@@ -732,6 +735,12 @@ async def today_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await persist_snapshot(session, portfolio)
             await session.commit()
         async with Session() as session:
+            from app.services.risk_engine import evaluate_portfolio
+            from app.services.risk_service import record_findings
+
+            findings, _s = await evaluate_portfolio(session, user.id, portfolio.id, None)
+            await record_findings(session, user.id, findings)
+            await session.commit()
             brief = await build_daily_brief(session, user.id, portfolio)
     except Exception as exc:  # noqa: BLE001
         log.exception("today brief failed")
@@ -993,5 +1002,127 @@ async def on_wladd_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await query.answer("已加入观察池")
     try:
         await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# ---------------------------------------------------------------- M4：预警 / 报告 / 设置
+
+
+async def alerts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorized(update):
+        await _deny(update)
+        return
+    assert update.message is not None
+    loaded = await _load_user(update)
+    if loaded is None:
+        return
+    user, _pf = loaded
+    from app.services.risk_service import list_events
+
+    async with Session() as session:
+        events = await list_events(session, user.id)
+    if not events:
+        await update.message.reply_text(
+            "⚠️ **风险预警**（暂无记录）\n\n风险事件会在盘后简报、行情更新时自动记录。"
+            "发送 /today 或 /update_quotes 触发一次评估。"
+        )
+        return
+    icons = {"red": "🔴", "yellow": "🟡", "info": "🔵"}
+    lines = ["⚠️ **风险预警历史**（最近 20 条）\n"]
+    for e in events:
+        ts = (e.created_at or "")[:16].replace("T", " ")
+        lines.append(f"{icons.get(e.level, '•')} [{e.code}] {ts}\n   {e.message[:120]}")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorized(update):
+        await _deny(update)
+        return
+    assert update.message is not None
+    kind = (context.args[0].lower() if context.args else "week")
+    if kind not in ("week", "weekly", "month", "monthly"):
+        await update.message.reply_text("用法：`/report week` 或 `/report month`", parse_mode="Markdown")
+        return
+    mode = "weekly" if kind.startswith("week") else "monthly"
+    loaded = await _load_user(update)
+    if loaded is None:
+        return
+    user, portfolio = loaded
+    msg = await update.message.reply_text("⏳ 正在生成报告…")
+    try:
+        async with Session() as session:
+            if mode == "weekly":
+                content = await _report_weekly(session, user.id, portfolio)
+            else:
+                content = await _report_monthly(session, user.id, portfolio)
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.exception("report failed")
+        await msg.edit_text(f"❌ 报告生成失败：{type(exc).__name__}: {exc}")
+        return
+    await msg.edit_text(content, parse_mode="Markdown")
+
+
+async def _report_weekly(session, user_id, portfolio):
+    from app.services.report_service import weekly_report
+
+    return await weekly_report(session, user_id, portfolio)
+
+
+async def _report_monthly(session, user_id, portfolio):
+    from app.services.report_service import monthly_report
+
+    return await monthly_report(session, user_id, portfolio)
+
+
+async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorized(update):
+        await _deny(update)
+        return
+    assert update.message is not None
+    loaded = await _load_user(update)
+    if loaded is None:
+        return
+    user, _pf = loaded
+    from app.services.settings_service import SETTING_LABELS, all_settings
+
+    async with Session() as session:
+        s = await all_settings(session, user.id)
+    lines = ["⚙️ **设置**\n", "自动任务："]
+    buttons = []
+    for key, label in SETTING_LABELS.items():
+        on = s.get(key, True)
+        lines.append(f"• {label}：{'✅ 开' if on else '❌ 关'}")
+        buttons.append([InlineKeyboardButton(f"{label[:10]}：{'开→关' if on else '关→开'}", callback_data=f"set:{key}:{'0' if on else '1'}")])
+    lines += ["", "点按钮切换；日报/周报/月报会经通知队列投递。"]
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def on_set_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None or not _authorized(update):
+        if query:
+            await query.answer("未授权", show_alert=True)
+        return
+    _, key, value = query.data.split(":")  # type: ignore[union-attr]
+    loaded = await _load_user(update)
+    if loaded is None:
+        return
+    user, _pf = loaded
+    from app.services.settings_service import SETTING_LABELS, set_setting
+
+    if key not in SETTING_LABELS:
+        await query.answer("未知设置", show_alert=True)
+        return
+    async with Session() as session:
+        await set_setting(session, user.id, key, value == "1")
+        await session.commit()
+    await query.answer("已更新")
+    try:
+        await query.edit_message_text(
+            f"✅ 已{'开启' if value == '1' else '关闭'}：{SETTING_LABELS[key]}"
+        )
     except Exception:  # noqa: BLE001
         pass

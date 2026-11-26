@@ -50,3 +50,160 @@ async def build_daily_brief(session: AsyncSession, user_id: int, portfolio: Port
     if summary["stale_symbols"]:
         lines.append("\nℹ️ 行情缺失的持仓按成本口径计，不构成精确仓位。")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------- M4：周报 / 月报
+
+
+def _period_range(kind: str, ref=None) -> tuple:
+    """返回 (start_date, end_date, period_label)。"""
+    from datetime import date as _date, timedelta as _td
+
+    ref = ref or _date.today()
+    if kind == "weekly":
+        start = ref - _td(days=ref.weekday() + 7)  # 上周一
+        end = start + _td(days=6)  # 上周日
+        iso = start.isocalendar()
+        label = f"{iso[0]}-W{iso[1]:02d}"
+        return start, end, label
+    # monthly：上个自然月
+    first_this = _date(ref.year, ref.month, 1)
+    end = first_this - _td(days=1)
+    start = _date(end.year, end.month, 1)
+    label = f"{start.year}-{start.month:02d}"
+    return start, end, label
+
+
+async def build_period_report(session: AsyncSession, user_id: int, portfolio_id: int, kind: str) -> str:
+    from datetime import date as _date
+
+    from sqlalchemy import select as _select
+
+    from app.storage.models import (
+        LedgerEntry,
+        PortfolioSnapshot,
+        Position,
+        ResearchVersion,
+        RiskEvent,
+    )
+
+    start, end, label = _period_range(kind)
+    lines = [f"📊 **{'投资周报' if kind == 'weekly' else '投资月报'}**（{label}）\n"]
+
+    snaps = (
+        (
+            await session.execute(
+                _select(PortfolioSnapshot)
+                .where(
+                    PortfolioSnapshot.portfolio_id == portfolio_id,
+                    PortfolioSnapshot.trade_date >= start,
+                    PortfolioSnapshot.trade_date <= end,
+                    PortfolioSnapshot.complete.is_(True),
+                )
+                .order_by(PortfolioSnapshot.trade_date)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if len(snaps) >= 2:
+        first_nav, last_nav = snaps[0].nav, snaps[-1].nav
+        ret = (last_nav / first_nav - 1) * 100 if first_nav > 0 else 0
+        peak = max(s.nav for s in snaps)
+        max_dd = (peak - min(s.nav for s in snaps)) / peak * 100 if peak > 0 else 0
+        lines.append(f"期间收益：{ret:+.2f}%（净值 {first_nav:,.0f} → {last_nav:,.0f}）")
+        lines.append(f"期间最大回撤：{max_dd:.2f}%")
+    else:
+        lines.append("期间完整快照不足 2 个，无法计算收益与回撤。")
+
+    trades = (
+        (
+            await session.execute(
+                _select(LedgerEntry).where(
+                    LedgerEntry.portfolio_id == portfolio_id,
+                    LedgerEntry.trade_date >= start,
+                    LedgerEntry.trade_date <= end,
+                    LedgerEntry.direction != "seed",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    lines.append(f"交易登记：{len(trades)} 笔")
+
+    research = (
+        (
+            await session.execute(
+                _select(ResearchVersion).where(
+                    ResearchVersion.user_id == user_id,
+                    ResearchVersion.as_of >= start,
+                    ResearchVersion.as_of <= end,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if research:
+        lines.append(f"研究更新：{len(research)} 份（{'、'.join(sorted({r.symbol for r in research}))}）")
+    else:
+        lines.append("研究更新：无")
+
+    events = (
+        (
+            await session.execute(
+                _select(RiskEvent).where(
+                    RiskEvent.user_id == user_id,
+                    RiskEvent.created_at >= f"{start} 00:00:00",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    red = sum(1 for e in events if e.level == "red")
+    yellow = sum(1 for e in events if e.level == "yellow")
+    lines.append(f"风险事件：🔴 {red} / 🟡 {yellow}")
+
+    positions = (
+        (
+            await session.execute(
+                _select(Position).where(Position.portfolio_id == portfolio_id).order_by(Position.total_cost.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if positions:
+        top = positions[0]
+        lines.append(f"当前第一大持仓（成本口径）：{top.symbol} ¥{top.total_cost:,.0f}")
+    lines += ["", "ℹ️ 本报告为模板化复盘，不构成投资建议。"]
+    return "\n".join(lines)
+
+
+async def save_report(session: AsyncSession, user_id: int, kind: str, period_label: str, content: str) -> None:
+    from sqlalchemy.dialects.mysql import insert as _ins
+
+    from app.storage.models import Report
+
+    stmt = _ins(Report).values(
+        user_id=user_id, report_type=kind, period=period_label, content=content
+    )
+    stmt = stmt.on_duplicate_key_update(content=stmt.inserted.content)
+    await session.execute(stmt)
+    await session.flush()
+
+
+async def weekly_report(session: AsyncSession, user_id: int, portfolio) -> str:
+    start, end, label = _period_range("weekly")
+    content = await build_period_report(session, user_id, portfolio.id, "weekly")
+    await save_report(session, user_id, "weekly", label, content)
+    return content
+
+
+async def monthly_report(session: AsyncSession, user_id: int, portfolio) -> str:
+    start, end, label = _period_range("monthly")
+    content = await build_period_report(session, user_id, portfolio.id, "monthly")
+    await save_report(session, user_id, "monthly", label, content)
+    return content

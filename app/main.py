@@ -10,17 +10,21 @@ from telegram.ext import (
 )
 
 from app.bot.handlers import (
+    alerts_cmd,
     cancel_cmd,
     help_cmd,
     import_cmd,
     menu,
     on_callback,
     on_document,
+    on_set_callback,
     on_text,
     on_wladd_callback,
     ping,
     portfolio_cmd,
+    report_cmd,
     research_cmd,
+    settings_cmd,
     start,
     status,
     trade_cmd,
@@ -61,10 +65,14 @@ def main() -> None:
     app.add_handler(CommandHandler("update_quotes", update_quotes_cmd))
     app.add_handler(CommandHandler("research", research_cmd))
     app.add_handler(CommandHandler("valuation", valuation_cmd))
+    app.add_handler(CommandHandler("alerts", alerts_cmd))
+    app.add_handler(CommandHandler("report", report_cmd))
+    app.add_handler(CommandHandler("settings", settings_cmd))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(CallbackQueryHandler(on_callback, pattern=r"^act:"))
     app.add_handler(CallbackQueryHandler(on_wladd_callback, pattern=r"^wladd:"))
+    app.add_handler(CallbackQueryHandler(on_set_callback, pattern=r"^set:"))
 
     async def on_error(update: object, context) -> None:  # type: ignore[no-untyped-def]
         logging.getLogger(__name__).error("Unhandled error", exc_info=context.error)
@@ -79,13 +87,19 @@ def main() -> None:
 
     app.add_error_handler(on_error)
 
-    from app.jobs.scheduler import post_close_job, send_pending_outbox
+    from app.jobs.scheduler import monthly_job, post_close_job, send_pending_outbox, weekly_job
 
     async def _outbox_job(context) -> None:  # type: ignore[no-untyped-def]
         await send_pending_outbox(context.bot)
 
     async def _post_close(context) -> None:  # type: ignore[no-untyped-def]
         await post_close_job(context.bot)
+
+    async def _weekly(context) -> None:  # type: ignore[no-untyped-def]
+        await weekly_job(context.bot)
+
+    async def _monthly(context) -> None:  # type: ignore[no-untyped-def]
+        await monthly_job(context.bot)
 
     if settings.enable_schedules:
         from zoneinfo import ZoneInfo
@@ -98,6 +112,18 @@ def main() -> None:
             time=dtmod.time(hour=16, minute=35, tzinfo=ZoneInfo("Asia/Shanghai")),
             days=(0, 1, 2, 3, 4),
             name="post_close_brief",
+        )
+        app.job_queue.run_daily(
+            _weekly,
+            time=dtmod.time(hour=10, minute=0, tzinfo=ZoneInfo("Asia/Shanghai")),
+            days=(5,),
+            name="weekly_report",
+        )
+        app.job_queue.run_monthly(
+            _monthly,
+            time=dtmod.time(hour=10, minute=0, tzinfo=ZoneInfo("Asia/Shanghai")),
+            day=1,
+            name="monthly_report",
         )
 
     app.run_polling(drop_pending_updates=True)
