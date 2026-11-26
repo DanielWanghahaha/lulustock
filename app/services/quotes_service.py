@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import select
+from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.ledger import EntryRow, compute_cash
@@ -53,17 +54,23 @@ async def update_quotes_for_symbols(session: AsyncSession, symbols: list[str]) -
             failed += 1
             continue
         for q in quotes:
-            await session.merge(
-                DailyQuote(
-                    symbol=q.symbol,
-                    trade_date=q.trade_date,
-                    close=Decimal(str(q.close)),
-                    source=q.source,
-                    quality="ok",
-                    source_url=q.source_url,
-                    fetched_at=q.fetched_at,
-                )
+            stmt = mysql_insert(DailyQuote).values(
+                symbol=q.symbol,
+                trade_date=q.trade_date,
+                close=Decimal(str(q.close)),
+                currency="CNY",
+                source=q.source,
+                quality="ok",
+                source_url=q.source_url,
+                fetched_at=q.fetched_at,
             )
+            stmt = stmt.on_duplicate_key_update(
+                close=stmt.inserted.close,
+                source_url=stmt.inserted.source_url,
+                fetched_at=stmt.inserted.fetched_at,
+                quality="ok",
+            )
+            await session.execute(stmt)
             trading_dates.add(q.trade_date)
         if quotes:
             last = max(quotes, key=lambda x: x.trade_date)
@@ -72,7 +79,9 @@ async def update_quotes_for_symbols(session: AsyncSession, symbols: list[str]) -
         else:
             failed += 1
     for d in trading_dates:
-        await session.merge(TradingCalendar(trade_date=d, source=PROVIDER.source))
+        cal_stmt = mysql_insert(TradingCalendar).values(trade_date=d, source=PROVIDER.source)
+        cal_stmt = cal_stmt.on_duplicate_key_update(source=cal_stmt.inserted.source)
+        await session.execute(cal_stmt)
     await session.flush()
     return {
         "ok": ok,
