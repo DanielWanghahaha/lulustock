@@ -23,13 +23,22 @@ log = logging.getLogger(__name__)
 
 DIRECTION, SYMBOL, QUANTITY, PRICE, FEE, CASH_SYMBOL, CASH_AMOUNT = range(7)
 
-_DIR_OPTIONS = [
-    ("tw:dir:buy", "买入"),
-    ("tw:dir:sell", "卖出"),
-    ("tw:dir:deposit", "入金"),
-    ("tw:dir:withdraw", "出金"),
-    ("tw:dir:dividend", "分红"),
-]
+def _dir_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("买入", callback_data="tw:dir:buy"),
+                InlineKeyboardButton("卖出", callback_data="tw:dir:sell"),
+            ],
+            [
+                InlineKeyboardButton("入金", callback_data="tw:dir:deposit"),
+                InlineKeyboardButton("出金", callback_data="tw:dir:withdraw"),
+                InlineKeyboardButton("分红", callback_data="tw:dir:dividend"),
+            ],
+        ]
+    )
+
+
 _DIR_LABELS = {
     TradeDirection.buy: "买入",
     TradeDirection.sell: "卖出",
@@ -50,7 +59,7 @@ async def entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
         "✏️ **交易入账向导**（登记已完成交易，不是下单）\n\n请选择方向：",
         parse_mode="Markdown",
-        reply_markup=_kb([_DIR_OPTIONS[:2], _DIR_OPTIONS[2:]]),
+        reply_markup=_dir_keyboard(),
     )
     return DIRECTION
 
