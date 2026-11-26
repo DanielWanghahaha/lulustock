@@ -273,6 +273,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/research 代码 — 个股研究\n"
         "/valuation 代码 — 三情景估值\n"
         "/today — 盘后简报\n"
+        "/stress [幅度] — 压力测试（如 /stress 25）\n"
+        "/decision 代码 — 深度决策卡\n"
         "/alerts — 风险预警历史\n"
         "/report week|month — 周报 / 月报\n"
         "/settings — 自动任务开关\n"
@@ -502,6 +504,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await _handle_watchlist_intent(update, txt, user):
         return
     if await _handle_research_intent(update, txt):
+        return
+    if await _handle_m5_intent(update, context, txt):
         return
     parsed = parse_trade_text(txt)
     if isinstance(parsed, str):
@@ -1285,3 +1289,185 @@ async def on_set_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
     except Exception:  # noqa: BLE001
         pass
+
+
+# ---------------------------------------------------------------- M5：压力测试 / 决策卡
+
+
+def _stress_card(base: dict, results, missing: list[str]) -> str:
+    lines = [
+        "🧪 **压力测试**（情景假设，非预测、非保证）\n",
+        f"基准净值：¥{_fmt(base['nav'])}（现金 {_fmt(base['cash'])} + 持仓市值 {_fmt(base['market_value'])}，{base['positions']} 只持仓）",
+        f"回撤容忍线：{base['tolerance_pct']:.0f}%\n",
+    ]
+    for r in results:
+        flag = "🔴 已触线" if r.breach else "✅ 未触线"
+        lines.append(
+            f"📉 大盘 -{r.drop_pct:.0f}%：净值 ¥{_fmt(r.shocked_nav)}（亏损 ¥{_fmt(r.loss)} / {r.loss_pct:.2f}%）"
+            f"，现金占比 {r.cash_weight_after:.1f}% {flag}"
+        )
+    if missing:
+        lines.append(f"\n⚠️ 以下持仓缺行情未纳入情景重估：{'、'.join(missing)}")
+    lines.append("\nℹ️ 假设所有持仓与大盘同幅下跌（β=1），未考虑个股分化与相关性变化。")
+    return "\n".join(lines)
+
+
+async def stress_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorized(update):
+        await _deny(update)
+        return
+    assert update.message is not None
+    drops = [0.10, 0.20, 0.30]
+    if context.args:
+        try:
+            v = Decimal(context.args[0].strip("%")) / 100
+            if not (0 < v < 1):
+                raise InvalidOperation
+            drops = [float(v)]
+        except (InvalidOperation, ValueError, IndexError):
+            await update.message.reply_text("用法：`/stress`（默认三档）或 `/stress 25`（自定义 -25%）", parse_mode="Markdown")
+            return
+    loaded = await _load_user(update)
+    if loaded is None:
+        return
+    _user, portfolio = loaded
+    msg = await update.message.reply_text("⏳ 正在计算压力情景…")
+    from app.services.stress_service import run_stress
+
+    async with Session() as session:
+        base, results, missing = await run_stress(session, portfolio, _user.id, drops)
+    await msg.edit_text(_stress_card(base, results, missing), parse_mode="Markdown")
+
+
+async def decision_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorized(update):
+        await _deny(update)
+        return
+    assert update.message is not None
+    arg = context.args[0] if context.args else ""
+    if not arg:
+        await update.message.reply_text(
+            "⚖️ **深度决策卡**\n\n请发送：`/decision 600036.SH`（也支持名称/拼音：`决策 招行`）",
+            parse_mode="Markdown",
+        )
+        return
+    await _run_decision_flow(update, arg)
+
+
+async def _run_decision_flow(update: Update, target: str) -> None:
+    assert update.effective_chat is not None
+    symbol = _norm_sym(target)
+    if symbol is None:
+        async with Session() as session:
+            matches = await search_securities(session, target)
+            await session.commit()
+        if not matches:
+            if update.message:
+                await update.message.reply_text(f"未找到与「{target}」匹配的 A 股。")
+            return
+        if len(matches) == 1:
+            symbol = matches[0]["symbol"]
+        else:
+            buttons = [
+                [InlineKeyboardButton(f"{mm['name']}（{mm['symbol']}）", callback_data=f"dec:{mm['symbol']}")]
+                for mm in matches[:8]
+            ]
+            if update.message:
+                await update.message.reply_text("找到多个候选，请点击选择：", reply_markup=InlineKeyboardMarkup(buttons))
+            return
+    loaded = await _load_user(update)
+    if loaded is None:
+        return
+    user, portfolio = loaded
+    send_target = update.message or (update.callback_query.message if update.callback_query else None)
+    if send_target is None:
+        return
+    msg = await send_target.reply_text(f"⏳ 正在生成 {symbol} 决策卡（结合持仓与财务，约 30-60 秒）…")
+    from app.services.decision_service import run_decision
+
+    try:
+        async with Session() as session:
+            result = await run_decision(session, user.id, portfolio.id, symbol)
+            await session.commit()
+    except LLMError as exc:
+        await msg.edit_text(f"❌ 决策卡生成失败：{exc}")
+        return
+    except Exception as exc:  # noqa: BLE001
+        log.exception("decision failed")
+        await msg.edit_text(f"❌ 决策卡生成失败：{type(exc).__name__}: {exc}")
+        return
+    if "error" in result:
+        await msg.edit_text(f"⚠️ {result['error']}")
+        return
+    p = result["payload"]
+    rec_labels = {
+        "wait": "观望", "hold": "持有", "review_add": "评估加仓",
+        "review_reduce": "评估减仓", "insufficient_data": "数据不足",
+    }
+    pos_txt = result["position"].get("quantity", "0")
+    lines = [
+        f"⚖️ **{p.get('company_name') or symbol}** 决策卡 v{result['version']}",
+        f"当前持仓：{pos_txt}股（成本 {result['position'].get('avg_cost', '—')}）",
+        f"建议方向：**{rec_labels.get(p.get('recommendation'), p.get('recommendation'))}**（置信 {p.get('confidence')}）",
+        f"\n📄 {p.get('summary', '')}\n",
+        "**三情景对比：**",
+    ]
+    for a in p.get("actions", []):
+        lines.append(f"\n**{a.get('action')}**")
+        lines.append(f"· 依据：{a.get('rationale', '')[:150]}")
+        conds = a.get("preconditions") or []
+        if conds:
+            lines.append(f"· 前提：{'；'.join(conds[:3])[:150]}")
+        risks = a.get("risks") or []
+        if risks:
+            lines.append(f"· 风险：{'；'.join(risks[:3])[:150]}")
+    kc = p.get("key_conditions") or []
+    if kc:
+        lines.append(f"\n**关键跟踪：**{'；'.join(kc[:5])}")
+    md = p.get("missing_data") or []
+    if md:
+        lines.append(f"\n⚠️ 缺失数据：{'、'.join(md[:6])}")
+    if result.get("fin") and (result["fin"].get("valuation_snapshot") or {}).get("pe_ttm"):
+        snap = result["fin"]["valuation_snapshot"]
+        lines.append(f"\n📊 PE(TTM) {snap['pe_ttm']} / PB {snap.get('pb') or '—'}（东财快照）")
+    lines.append("\nℹ️ 决策卡为研究参考，不构成交易指令；实际交易请自行确认。")
+    text = "\n".join(lines[:60])
+    try:
+        await msg.edit_text(text, parse_mode="Markdown")
+    except Exception:  # noqa: BLE001
+        await msg.edit_text(text)
+
+
+async def on_dec_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None or not _authorized(update):
+        if query:
+            await query.answer("未授权", show_alert=True)
+        return
+    symbol = query.data.split(":", 1)[1]  # type: ignore[union-attr]
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception:  # noqa: BLE001
+        pass
+    await _run_decision_flow(update, symbol)
+
+
+_INTENT_STRESS_RE = _re.compile(r"压力测试|跌\s*(\d{1,2}(?:\.\d+)?)\s*%?")
+_INTENT_DECISION_RE = _re.compile(r"^(?:决策|深度决策)\s*[:：]?\s*(.+)$")
+
+
+async def _handle_m5_intent(update: Update, context: ContextTypes.DEFAULT_TYPE, txt: str) -> bool:
+    if "压力测试" in txt:
+        await stress_cmd(update, context)
+        return True
+    m = _INTENT_STRESS_RE.search(txt)
+    if m and ("亏" in txt or "压力" in txt):
+        drop = m.group(1)
+        context.args = [drop] if drop else []
+        await stress_cmd(update, context)
+        return True
+    m2 = _INTENT_DECISION_RE.match(txt)
+    if m2:
+        await _run_decision_flow(update, m2.group(1).strip())
+        return True
+    return False

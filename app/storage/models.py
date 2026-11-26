@@ -314,7 +314,9 @@ class ResearchVersion(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     symbol: Mapped[str] = mapped_column(String(16))
     version: Mapped[int] = mapped_column(Integer)
-    mode: Mapped[str] = mapped_column(SAEnum("research", "valuation", name="research_mode"), default="research")
+    mode: Mapped[str] = mapped_column(
+        SAEnum("research", "valuation", "decision", name="research_mode"), default="research"
+    )
     as_of: Mapped[sa.Date] = mapped_column(Date)
     conclusion: Mapped[str | None] = mapped_column(String(32), nullable=True)
     payload: Mapped[dict] = mapped_column(JSON)

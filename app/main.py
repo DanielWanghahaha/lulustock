@@ -29,11 +29,14 @@ BOT_COMMANDS = [
 from app.bot.handlers import (
     alerts_cmd,
     cancel_cmd,
+    decision_cmd,
+    stress_cmd,
     help_cmd,
     import_cmd,
     menu,
     on_callback,
     on_document,
+    on_dec_callback,
     on_rs_callback,
     on_set_callback,
     on_text,
@@ -94,6 +97,8 @@ def main() -> None:
     app.add_handler(CommandHandler("alerts", alerts_cmd))
     app.add_handler(CommandHandler("report", report_cmd))
     app.add_handler(CommandHandler("settings", settings_cmd))
+    app.add_handler(CommandHandler("stress", stress_cmd))
+    app.add_handler(CommandHandler("decision", decision_cmd))
     from app.bot.trade_wizard import build_trade_conversation
 
     app.add_handler(build_trade_conversation())
@@ -103,6 +108,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(on_wladd_callback, pattern=r"^wladd:"))
     app.add_handler(CallbackQueryHandler(on_set_callback, pattern=r"^set:"))
     app.add_handler(CallbackQueryHandler(on_rs_callback, pattern=r"^rsm:"))
+    app.add_handler(CallbackQueryHandler(on_dec_callback, pattern=r"^dec:"))
 
     async def on_error(update: object, context) -> None:  # type: ignore[no-untyped-def]
         logging.getLogger(__name__).error("Unhandled error", exc_info=context.error)
