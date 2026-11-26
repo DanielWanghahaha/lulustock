@@ -1,0 +1,19 @@
+[Unit]
+Description=Stock Agent Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 修改为实际部署路径与 Python 版本
+User=www
+WorkingDirectory=/www/wwwroot/stock-agent
+Environment="PATH=/www/wwwroot/stock-agent/.venv/bin:/usr/local/bin:/usr/bin"
+ExecStart=/www/wwwroot/stock-agent/.venv/bin/python -m app.main
+Restart=always
+RestartSec=10
+StandardOutput=append:/www/wwwroot/stock-agent/logs/app.log
+StandardError=append:/www/wwwroot/stock-agent/logs/app.log
+
+[Install]
+WantedBy=multi-user.target
