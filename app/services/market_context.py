@@ -80,3 +80,17 @@ async def gather_price_context(session: AsyncSession, symbol: str, days: int = 4
         "ma60": ma(60),
         "history_points": len(closes),
     }
+
+
+async def financial_context(symbol: str) -> dict[str, Any] | None:
+    """估值快照 + 报告期财务指标（东财公开 F10，未核验）。失败返回 None。"""
+    from app.providers.fundamentals import fetch_financial_summary, fetch_valuation_snapshot
+
+    try:
+        val = await fetch_valuation_snapshot(symbol)
+        periods = await fetch_financial_summary(symbol)
+        if not val and not periods:
+            return None
+        return {"valuation_snapshot": val, "report_periods": periods}
+    except Exception:  # noqa: BLE001
+        return None

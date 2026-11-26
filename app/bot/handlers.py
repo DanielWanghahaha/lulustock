@@ -845,7 +845,16 @@ async def _run_and_send_research(update: Update, symbol_raw: str, mode: str) -> 
         await msg.edit_text(f"⚠️ {result['error']}")
         return
     payload = result["payload"]
-    card = _research_card(payload, symbol, result["version"], mode)
+    fin = result.get("fin") or {}
+    snap = fin.get("valuation_snapshot") or {}
+    if snap.get("pe_ttm"):
+        card = _research_card(payload, symbol, result["version"], mode)
+        card += (
+            f"\n📊 估值快照：PE(TTM) {snap['pe_ttm']} / PB {snap.get('pb') or '—'}"
+            f" / 总市值 {snap.get('total_market_cap_yi') or '—'}亿（东财，未核验）"
+        )
+    else:
+        card = _research_card(payload, symbol, result["version"], mode)
     try:
         await msg.edit_text(card, parse_mode="Markdown", reply_markup=_research_keyboard(symbol))
     except Exception:  # noqa: BLE001

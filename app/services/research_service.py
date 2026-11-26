@@ -80,19 +80,30 @@ async def run_research(session: AsyncSession, user_id: int, symbol: str, mode: s
     price = await gather_price_context(session, symbol, days=250)
     if not price:
         return {"error": f"没有 {symbol} 的行情数据（代码可能无效或不支持的市场）"}
+    from app.services.market_context import financial_context
+
+    fin = await financial_context(symbol)
 
     mode_note = (
         "本次任务：完整个股研究（投资逻辑、反方、风险、三情景估值）。"
         if mode == "research"
         else "本次任务：重点输出三情景估值及关键假设，thesis 与 counterarguments 各给 2 条即可。"
     )
+    if fin:
+        fin_note = (
+            "财务与估值数据（来源：东方财富公开快照与F10主要指标，未独立核验；"
+            "分红历史、现金流量明细等仍缺失，需列入 missing_data）：\n"
+            f"{fin}\n\n"
+        )
+    else:
+        fin_note = "财务数据：本次未获取到财务数据（missing_data 必须包含财报关键项）。\n\n"
     user_prompt = (
         f"{mode_note}\n\n"
         f"标的：{symbol}\n"
         f"行情数据（来源：腾讯公开日K，未复权收盘，JSON）：\n"
         f"{price}\n\n"
-        "财务数据：本次未接入财务数据库（missing_data 必须包含财报关键项）。"
-        "请基于行情与你的公开知识（标注未核验）输出 JSON。"
+        f"{fin_note}"
+        "请基于给定数据与你的公开知识（定性内容标注未核验）输出 JSON。"
     )
     result = await chat_json(SYSTEM_PROMPT, user_prompt, max_tokens=3000)
     validated = _validate(result)
@@ -123,6 +134,9 @@ async def run_research(session: AsyncSession, user_id: int, symbol: str, mode: s
         conclusion=validated["conclusion"],
         payload=validated,
     )
+    qf = validated.setdefault("quality_flags", {})
+    qf["financial_data_available"] = bool(fin)
+    qf["llm_knowledge_unverified"] = True
     session.add(row)
     await session.flush()
-    return {"version": version, "payload": validated, "price": price}
+    return {"version": version, "payload": validated, "price": price, "fin": fin}
