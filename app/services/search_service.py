@@ -19,36 +19,38 @@ _MARKET_MAP = {"1": ".SH", "2": ".SZ"}
 
 
 async def ensure_securities(session: AsyncSession) -> int:
-    """首次调用时拉取全 A 股列表缓存（约 5500 行）。"""
+    """首次调用时拉取全 A 股列表缓存（新浪 hs_a，约 5800 行）。"""
     count = (await session.execute(select(func.count()).select_from(Security))).scalar()
     if count and count > 5000:
         return count
     total_inserted = 0
     async with httpx.AsyncClient(timeout=15, headers=_HEADERS) as client:
         page = 1
-        while page <= 30:
+        while page <= 80:
             resp = await client.get(
-                "https://push2.eastmoney.com/api/qt/clist/get",
-                params={
-                    "pn": str(page), "pz": "500", "po": "1", "np": "1",
-                    "fltt": "2", "invt": "2", "fid": "f12",
-                    "fs": "m:1+t:2,m:1+t:23,m:0+t:6,m:0+t:80",
-                    "fields": "f12,f14",
-                },
+                "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData",
+                params={"page": str(page), "num": "100", "sort": "symbol", "asc": "1", "node": "hs_a"},
             )
             resp.raise_for_status()
-            data = resp.json().get("data") or {}
-            rows = data.get("diff") or []
+            rows = resp.json()
             if not rows:
                 break
             for d in rows:
-                code, name = d.get("f12"), d.get("f14")
-                if not code or not name:
+                raw = (d.get("symbol") or "").strip().lower()  # 如 sh600036 / sz000001 / bj920000
+                name = (d.get("name") or "").strip()
+                if not raw or not name:
                     continue
-                symbol = normalize_symbol(code)
-                if symbol is None:
+                prefix, _, code = raw.partition(":")
+                market = None
+                if raw.startswith("sh"):
+                    market, code = "SH", raw[2:]
+                elif raw.startswith("sz"):
+                    market, code = "SZ", raw[2:]
+                elif raw.startswith("bj"):
+                    market, code = "BJ", raw[2:]
+                if market is None or not (code.isdigit() and len(code) == 6):
                     continue
-                market = "SH" if symbol.endswith(".SH") else ("SZ" if symbol.endswith(".SZ") else "BJ")
+                symbol = f"{code}.{market}"
                 stmt = mysql_insert(Security).values(
                     symbol=symbol, name=name, market=market,
                     updated_at=datetime.now(timezone.utc).replace(tzinfo=None),
@@ -56,8 +58,6 @@ async def ensure_securities(session: AsyncSession) -> int:
                 stmt = stmt.on_duplicate_key_update(name=stmt.inserted.name)
                 await session.execute(stmt)
                 total_inserted += 1
-            if len(rows) < 500:
-                break
             page += 1
     await session.flush()
     log.info("securities cache loaded: %s", total_inserted)
@@ -128,10 +128,60 @@ async def search_securities(session: AsyncSession, query: str, limit: int = 8) -
 
 
 async def names_for(session: AsyncSession, symbols: list[str]) -> dict[str, str]:
-    """批量查询代码→名称（无缓存时代码即名称占位）。"""
+    """批量查询代码→名称：本地缓存 → 腾讯批量接口补齐（并回填缓存）。"""
     if not symbols:
         return {}
     rows = (
         await session.execute(select(Security).where(Security.symbol.in_(symbols)))
     ).scalars().all()
-    return {r.symbol: r.name for r in rows}
+    result = {r.symbol: r.name for r in rows}
+    missing = [s for s in symbols if s not in result]
+    if missing:
+        try:
+            fetched = await fetch_names_tencent(missing)
+            result.update(fetched)
+            for sym, nm in fetched.items():
+                code, _, suffix = sym.partition(".")
+                stmt = mysql_insert(Security).values(
+                    symbol=sym, name=nm, market=suffix,
+                    updated_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                )
+                stmt = stmt.on_duplicate_key_update(name=stmt.inserted.name)
+                await session.execute(stmt)
+            await session.flush()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("tencent name fetch failed: %s", exc)
+    return result
+
+
+async def fetch_names_tencent(symbols: list[str]) -> dict[str, str]:
+    """腾讯批量行情取名称。"""
+    codes = []
+    for s in symbols:
+        code, _, suffix = s.partition(".")
+        if suffix in ("SH", "SZ"):
+            codes.append(f"{suffix.lower()}{code}")
+    if not codes:
+        return {}
+    out: dict[str, str] = {}
+    async with httpx.AsyncClient(timeout=10, headers=_HEADERS) as client:
+        for i in range(0, len(codes), 40):
+            batch = codes[i : i + 40]
+            resp = await client.get("https://qt.gtimg.cn/q=" + ",".join(batch))
+            resp.raise_for_status()
+            text = resp.content.decode("gbk", errors="replace")
+            for entry in text.split(";"):
+                entry = entry.strip()
+                if "=" not in entry:
+                    continue
+                var, body = entry.split("=", 1)
+                fields = body.strip('"').split("~")
+                if len(fields) < 45 or not fields[2]:
+                    continue
+                code, suffix = fields[2], var[-2:].lower().replace("v_", "")
+                # var 形如 v_sh600036
+                v = var.replace("v_", "")
+                prefix, market = v[:2].lower(), v[:2].upper()
+                sym = f"{code}.{market}"
+                out[sym] = fields[1]
+    return out
