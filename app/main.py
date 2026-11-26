@@ -1,9 +1,28 @@
 """Bot 入口：注册命令并启动 long polling。"""
 import logging
 
-from telegram.ext import Application, CommandHandler
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    MessageHandler,
+    filters,
+)
 
-from app.bot.handlers import help_cmd, menu, ping, start, status
+from app.bot.handlers import (
+    cancel_cmd,
+    help_cmd,
+    import_cmd,
+    menu,
+    on_callback,
+    on_document,
+    on_text,
+    ping,
+    portfolio_cmd,
+    start,
+    status,
+    trade_cmd,
+)
 from app.config import get_settings
 
 
@@ -27,6 +46,13 @@ def main() -> None:
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("ping", ping))
+    app.add_handler(CommandHandler("import", import_cmd))
+    app.add_handler(CommandHandler("trade", trade_cmd))
+    app.add_handler(CommandHandler("portfolio", portfolio_cmd))
+    app.add_handler(CommandHandler("cancel", cancel_cmd))
+    app.add_handler(MessageHandler(filters.Document.ALL, on_document))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    app.add_handler(CallbackQueryHandler(on_callback, pattern=r"^act:"))
 
     app.run_polling(drop_pending_updates=True)
 
